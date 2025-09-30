@@ -57,7 +57,15 @@ class MainApp extends HookWidget {
       seedColor: Color(0xFF287390),
     );
 
-    final settings = userSettings.copyWith(lightAngle: lightAngle);
+    final settings = userSettings.copyWith(
+      lightAngle: lightAngle,
+      blur: 0 ?? flutterLogoThickness / 5,
+      // thickness: 100 ?? flutterLogoThickness,
+      thickness: 15,
+      glassColor: Theme.of(
+        context,
+      ).colorScheme.inversePrimary.withValues(alpha: .1),
+    );
     return CallbackShortcuts(
       bindings: {
         LogicalKeySet(LogicalKeyboardKey.space): () {
@@ -68,6 +76,7 @@ class MainApp extends HookWidget {
         },
       },
       child: MaterialApp(
+        // showPerformanceOverlay: true,
         debugShowCheckedModeBanner: false,
         theme: ThemeData.from(
           colorScheme: colorScheme,
@@ -96,9 +105,14 @@ class MainApp extends HookWidget {
                           alignment: Alignment.center,
                           child: Glassify(
                             settings: settings.copyWith(
-                              blur: flutterLogoThickness / 5,
+                              blur: 1,
                               thickness: flutterLogoThickness,
+                              glassColor: Theme.of(context)
+                                  .colorScheme
+                                  .inversePrimary
+                                  .withValues(alpha: .8),
                             ),
+
                             child: FlutterLogo(size: 200),
                           ),
                         ),

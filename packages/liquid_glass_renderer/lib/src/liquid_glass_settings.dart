@@ -10,6 +10,7 @@ class LiquidGlassSettings with EquatableMixin {
     this.glassColor = const Color.fromARGB(0, 255, 255, 255),
     this.thickness = 20,
     this.blur = 0,
+    this.kawaseSteps,
     this.chromaticAberration = .01,
     this.blend = 20,
     this.lightAngle = 0.5 * pi,
@@ -18,6 +19,7 @@ class LiquidGlassSettings with EquatableMixin {
     this.refractiveIndex = 1.51,
     this.saturation = 1.0,
     this.lightness = 1.0,
+    this.performanceBlur = true,
   });
 
   /// The color tint of the glass effect.
@@ -36,6 +38,8 @@ class LiquidGlassSettings with EquatableMixin {
   ///
   /// Defaults to 0.
   final double blur;
+
+  final double? kawaseSteps;
 
   /// The chromatic aberration of the glass effect (WIP).
   ///
@@ -82,11 +86,14 @@ class LiquidGlassSettings with EquatableMixin {
   /// Defaults to 1.0
   final double lightness;
 
+  final bool performanceBlur;
+
   /// Creates a new [LiquidGlassSettings] with the given settings.
   LiquidGlassSettings copyWith({
     Color? glassColor,
     double? thickness,
     double? blur,
+    double? kawaseSteps,
     double? chromaticAberration,
     double? blend,
     double? lightAngle,
@@ -95,11 +102,13 @@ class LiquidGlassSettings with EquatableMixin {
     double? refractiveIndex,
     double? saturation,
     double? lightness,
+    bool? performanceBlur,
   }) =>
       LiquidGlassSettings(
         glassColor: glassColor ?? this.glassColor,
         thickness: thickness ?? this.thickness,
         blur: blur ?? this.blur,
+        kawaseSteps: kawaseSteps ?? this.kawaseSteps,
         chromaticAberration: chromaticAberration ?? this.chromaticAberration,
         blend: blend ?? this.blend,
         lightAngle: lightAngle ?? this.lightAngle,
@@ -108,6 +117,7 @@ class LiquidGlassSettings with EquatableMixin {
         refractiveIndex: refractiveIndex ?? this.refractiveIndex,
         saturation: saturation ?? this.saturation,
         lightness: lightness ?? this.lightness,
+        performanceBlur: performanceBlur ?? this.performanceBlur,
       );
 
   @override
@@ -115,6 +125,7 @@ class LiquidGlassSettings with EquatableMixin {
         glassColor,
         thickness,
         blur,
+        kawaseSteps,
         chromaticAberration,
         blend,
         lightAngle,
@@ -123,5 +134,6 @@ class LiquidGlassSettings with EquatableMixin {
         refractiveIndex,
         saturation,
         lightness,
+        performanceBlur,
       ];
 }
