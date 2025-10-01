@@ -1,227 +1,194 @@
-// Copyright 2025, Tim Lehmann for whynotmake.it
+// liquid_glass_arbitrary.frag — Arbitrary-Variante (kompatibles Layout zu liquid_glass.frag)
 //
-// Alternative liquid glass shader with different normal calculation approach
-// This demonstrates how the shared rendering pipeline makes it easy to create variants
+// - Gepackter Header identisch zu liquid_glass.frag (0..5)
+// - Zusätzliche Matte-Uniforms direkt dahinter (6..7)
+// - Impeller 1D Blur Uniforms hinterlegt wie in liquid_glass.frag (102..106)
+// - CA & Blur via shared.glsl (applyGaussian1D_Impeller / calculateRefraction / renderLiquidGlass)
 
 #version 320 es
 precision highp float;
 
-#define DEBUG_NORMALS 0
-#define DEBUG_BLUR_MATTE 0
-
 #include <flutter/runtime_effect.glsl>
 
-// ============================================================================
-// Größen (Screen) und Foreground-Bounds
-// ============================================================================
-layout(location = 0)  uniform float uSizeW;
-layout(location = 1)  uniform float uSizeH;
-vec2 uSize = vec2(uSizeW, uSizeH);
+// ────────────────────────────────────────────────────────────────────────────
+// Gepackter Header (IDENTISCH zu liquid_glass.frag)
+// ────────────────────────────────────────────────────────────────────────────
+layout(location = 0) uniform vec2 uSize;           // auto von Flutter
+layout(location = 1) uniform vec4 uGlassColor;     // r,g,b,a
+layout(location = 2) uniform vec4 uOpticalProps;   // RI, CA, thickness, blend
+layout(location = 3) uniform vec4 uLightConfig;    // angle, intensity, ambient, saturation
+layout(location = 4) uniform vec2 uColorAdjust;    // lightness, numShapes (numShapes hier ungenutzt)
+layout(location = 5) uniform vec2 uLightDirection; // cos(angle), sin(angle)
 
-layout(location = 2)  uniform float uForegroundSizeW;
-layout(location = 3)  uniform float uForegroundSizeH;
-vec2 uForegroundSize = vec2(uForegroundSizeW, uForegroundSizeH);
+// Backwards-compatible Aliases (wie in liquid_glass.frag)
+float uRefractiveIndex     = uOpticalProps.x;
+float uChromaticAberration = uOpticalProps.y;
+float uThickness           = uOpticalProps.z;
+float uBlend               = uOpticalProps.w;
 
-// ============================================================================
-// Material-/Licht-/Physik-Parameter
-// ============================================================================
-layout(location = 4)  uniform float uChromaticAberration;
+float uLightAngle          = uLightConfig.x;  // legacy
+float uLightIntensity      = uLightConfig.y;
+float uAmbientStrength     = uLightConfig.z;
+float uSaturation          = uLightConfig.w;
 
-layout(location = 5)  uniform float uGlassColorR;
-layout(location = 6)  uniform float uGlassColorG;
-layout(location = 7)  uniform float uGlassColorB;
-layout(location = 8)  uniform float uGlassColorA;
-vec4 uGlassColor = vec4(uGlassColorR, uGlassColorG, uGlassColorB, uGlassColorA);
+float uLightness           = uColorAdjust.x;
+// float uNumShapes         = uColorAdjust.y; // hier nicht benötigt
 
-layout(location = 9)  uniform float uLightAngle;
-layout(location = 10) uniform float uLightIntensity;
-layout(location = 11) uniform float uAmbientStrength;
-layout(location = 12) uniform float uThickness;
-layout(location = 13) uniform float uRefractiveIndex;
+// ────────────────────────────────────────────────────────────────────────────
+#define DEBUG_NORMALS     0
+#define DEBUG_BLUR_MATTE  0
 
-layout(location = 14) uniform float uOffsetX;
-layout(location = 15) uniform float uOffsetY;
-vec2 uOffset = vec2(uOffsetX, uOffsetY);
+// ────────────────────────────────────────────────────────────────────────────
+// Matte/Layer-spezifische Uniforms (NEU, direkt hinter dem Header)
+// ────────────────────────────────────────────────────────────────────────────
+layout(location = 6) uniform vec2 uForegroundSize;  // Größe der Matte in Device-Px
+layout(location = 7) uniform vec2 uOffset;          // Top-left der Matte in Device-Px (Screen-Koords)
 
-// Farbanpassung
-layout(location = 16) uniform float uSaturation;  // =1.0
-layout(location = 17) uniform float uLightness;   // =1.0
+// ────────────────────────────────────────────────────────────────────────────
+// Impeller-Blur-Uniforms (IDENTISCH zu liquid_glass.frag)
+// ────────────────────────────────────────────────────────────────────────────
+layout(location = 102) uniform float u_dir_x;
+layout(location = 103) uniform float u_dir_y;
+layout(location = 104) uniform float u_sample_count;
+layout(location = 105) uniform float u_tile_mode;
+layout(location = 106) uniform vec4  u_samples[50]; // vec4(tPx, 0, w, 0)
 
-// Legacy-Blur-Uniforms (werden von renderLiquidGlass ignoriert, API-kompatibel)
-layout(location = 18) uniform float uGaussianBlur;
-layout(location = 19) uniform float uKawaseSteps;
-
-// ============================================================================
-// Impeller-Blur Uniforms (EXAKT wie gaussian_1d_blur.frag erwartet)
-// Diese Symbole werden von shared.glsl (applyGaussian1D_Impeller) verwendet!
-// ============================================================================
-layout(location = 20) uniform float u_size_x;        // device-px Breite
-layout(location = 21) uniform float u_size_y;        // device-px Höhe
-layout(location = 22) uniform float u_dir_x;         // 1,0=H  |  0,1=V
-layout(location = 23) uniform float u_dir_y;
-layout(location = 24) uniform float u_sample_count;  // Anzahl gepackter Samples
-layout(location = 25) uniform float u_tile_mode;     // 0=clamp,1=repeat,2=mirror,3=decal
-layout(location = 26) uniform vec4  u_samples[50];   // vec4(tPx, 0, w, 0)
-
-// ============================================================================
+// ────────────────────────────────────────────────────────────────────────────
 // Texturen
-// ============================================================================
-uniform sampler2D uBackgroundTexture;
-uniform sampler2D uForegroundTexture;
-uniform sampler2D uForegroundBlurredTexture;
+// ────────────────────────────────────────────────────────────────────────────
+uniform sampler2D uBackgroundTexture;        // scene behind glass
+uniform sampler2D uForegroundTexture;        // matte (RGBA) – ungeblurred
+uniform sampler2D uForegroundBlurredTexture; // matte (RGBA) – geblurrt (für SDF/Normal-Reko)
 
 layout(location = 0) out vec4 fragColor;
 
-// ============================================================================
-// shared.glsl erst NACH den Uniforms inkludieren (wichtige Reihenfolge!)
-// ============================================================================
+// ────────────────────────────────────────────────────────────────────────────
+// shared.glsl (nutzt uSize und Impeller-Uniforms oben)
+// ────────────────────────────────────────────────────────────────────────────
 #include "shared.glsl"
 
-// ============================================================================
-// Hilfsfunktionen (dein Arbitrary-Ansatz beibehalten)
-// ============================================================================
+// ────────────────────────────────────────────────────────────────────────────
+// Arbitrary-Hilfsfunktionen (deine Variante)
+// ────────────────────────────────────────────────────────────────────────────
 float approximateSDF(float blurredAlpha, float thickness) {
-    float normalizedDistance = smoothstep(0.0, 1.0, blurredAlpha);
-    return -normalizedDistance * thickness;
+  // alpha: 0=edge → 1=center  =>  SDF: 0=edge → -thickness=center
+  float normalizedDistance = clamp(blurredAlpha, 0.0, 1.0);
+  return -normalizedDistance * thickness;
 }
 
 vec2 findShapeCenter(vec2 currentUV) {
-    vec2 texelSize = 2.0 / uForegroundSize;
-    vec2 centerSum = vec2(0.0);
-    float totalAlpha = 0.0;
+  // UV 0..1 relativ zur Matte
+  vec2 texel = 2.0 / max(uForegroundSize, vec2(1.0));
+  vec2 centerSum = vec2(0.0);
+  float totalAlpha = 0.0;
 
-    int sampleRadius = 10;
-    for (int y = -sampleRadius; y <= sampleRadius; y++) {
-        for (int x = -sampleRadius; x <= sampleRadius; x++) {
-            vec2 sampleUV = currentUV + vec2(float(x), float(y)) * texelSize;
-            if (sampleUV.x >= 0.0 && sampleUV.x <= 1.0 && sampleUV.y >= 0.0 && sampleUV.y <= 1.0) {
-                float alpha = texture(uForegroundTexture, sampleUV).a;
-                if (alpha > 0.1) {
-                    centerSum += sampleUV * alpha;
-                    totalAlpha += alpha;
-                }
-            }
+  const int R = 10;
+  for (int y = -R; y <= R; y++) {
+    for (int x = -R; x <= R; x++) {
+      vec2 suv = currentUV + vec2(float(x), float(y)) * texel;
+      if (all(greaterThanEqual(suv, vec2(0.0))) &&
+          all(lessThanEqual   (suv, vec2(1.0)))) {
+        float a = texture(uForegroundTexture, suv).a;
+        if (a > 0.1) {
+          centerSum   += suv * a;
+          totalAlpha  += a;
         }
+      }
     }
-    return (totalAlpha > 0.0) ? (centerSum / totalAlpha) : currentUV;
-}
-
-vec2 calculateGradient(sampler2D tex, vec2 uv, vec2 texelSize) {
-    vec2 gradient = vec2(0.0);
-    float totalWeight = 0.0;
-
-    for (float scale = 1.0; scale <= 4.0; scale *= 2.0) {
-        float weight = 1.0 / scale;
-        vec2 d = texelSize * scale;
-
-        float tl = texture(tex, uv - d).a;
-        float tm = texture(tex, uv - vec2(0.0, d.y)).a;
-        float tr = texture(tex, uv + vec2(d.x, -d.y)).a;
-        float ml = texture(tex, uv - vec2(d.x, 0.0)).a;
-        float mr = texture(tex, uv + vec2(d.x, 0.0)).a;
-        float bl = texture(tex, uv + vec2(-d.x, d.y)).a;
-        float bm = texture(tex, uv + vec2(0.0, d.y)).a;
-        float br = texture(tex, uv + d).a;
-
-        float sobelX = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
-        float sobelY = (bl + 2.0 * bm + br) - (tl + 2.0 * tm + tr);
-
-        gradient += vec2(sobelX, sobelY) * weight;
-        totalWeight += weight;
-    }
-    return (gradient / totalWeight) * 0.125;
+  }
+  return (totalAlpha > 0.0) ? (centerSum / totalAlpha) : currentUV;
 }
 
 vec3 getReconstructedNormal(vec2 p, float thickness) {
-    vec2 uv = p / uForegroundSize;
+  // p: layer-lokale Device-Pixel-Koordinate
+  vec2 uv = p / max(uForegroundSize, vec2(1.0));
 
-    if (texture(uForegroundTexture, uv).a < 0.01) {
-        return vec3(0.0, 0.0, 1.0);
-    }
+  // ohne Matte → keine Normale
+  if (texture(uForegroundTexture, uv).a < 0.01) {
+    return vec3(0.0, 0.0, 1.0);
+  }
 
-    vec2 shapeCenter = findShapeCenter(uv);
-    vec2 centerToPoint = uv - shapeCenter;
+  vec2 centerUV = findShapeCenter(uv);
+  vec2 d = uv - centerUV;
+  float lenD = length(d);
+  if (lenD < 1e-3) return vec3(0.0, 0.0, 1.0);
 
-    if (length(centerToPoint) < 0.001) {
-        return vec3(0.0, 0.0, 1.0);
-    }
+  vec2 outward = d / lenD;
 
-    vec2 outwardDirection = normalize(centerToPoint);
+  float blurredAlpha  = texture(uForegroundBlurredTexture, uv).a;
+  float edgeDistance  = clamp(blurredAlpha, 0.0, 1.0);
 
-    float blurredAlpha = texture(uForegroundBlurredTexture, uv).a;
-    float edgeDistance = smoothstep(0.0, 1.0, blurredAlpha);
+  // z flacher machen, damit der Rand stärker reflektiert
+  float nz = pow(edgeDistance, 0.2);
+  float xyScale = sqrt(max(0.0, 1.0 - nz * nz));
 
-    float normalExponent = 0.2;
-    float normalZ = pow(edgeDistance, normalExponent);
-    float xyScale = sqrt(max(0.0, 1.0 - normalZ * normalZ));
-
-    return normalize(vec3(outwardDirection * xyScale, normalZ));
+  return normalize(vec3(outward * xyScale, nz));
 }
 
 vec3 getNormal(vec2 p, float thickness) {
-    return getReconstructedNormal(p, thickness);
+  return getReconstructedNormal(p, thickness);
 }
 
-// ============================================================================
+// ────────────────────────────────────────────────────────────────────────────
 // MAIN
-// ============================================================================
+// ────────────────────────────────────────────────────────────────────────────
 void main() {
-    // screenUV in Gerätepixel-Basis (wie bei liquid_glass.frag) + GLES Flip
-    vec2 screenUV = FlutterFragCoord().xy / vec2(u_size_x, u_size_y);
+  vec2 p = FlutterFragCoord().xy;
+  vec2 screenUV = p / uSize;
 #ifdef IMPELLER_TARGET_OPENGLES
-    screenUV.y = 1.0 - screenUV.y;
+  screenUV.y = 1.0 - screenUV.y;
 #endif
 
-    // Layer-lokale UVs für die Matte
-    vec2 layerLocalCoord = FlutterFragCoord().xy - uOffset;
-    vec2 layerUV = layerLocalCoord / uForegroundSize;
+  // Layer-lokale Koords/UV
+  vec2 layerLocal = p - uOffset;
+  vec2 layerUV    = layerLocal / uForegroundSize;
 
-    // Außerhalb der Matte → Hintergrund
-    if (layerUV.x < 0.0 || layerUV.x > 1.0 || layerUV.y < 0.0 || layerUV.y > 1.0) {
-        fragColor = texture(uBackgroundTexture, screenUV);
-        return;
-    }
+  // Außerhalb der Matte → Hintergrund
+  if (any(lessThan(layerUV, vec2(0.0))) || any(greaterThan(layerUV, vec2(1.0)))) {
+    fragColor = texScreen(uBackgroundTexture, screenUV);
+    return;
+  }
 
-    vec4 foregroundColor = texture(uForegroundTexture, layerUV);
-    if (foregroundColor.a < 0.001) {
-        fragColor = texture(uBackgroundTexture, screenUV);
-        return;
-    }
+  vec4 fg = texture(uForegroundTexture, layerUV);
+  if (fg.a < 0.001) {
+    fragColor = texScreen(uBackgroundTexture, screenUV);
+    return;
+  }
 
-    // "SDF" aus der geblurrten Alpha ableiten
-    vec4 blurred = texture(uForegroundBlurredTexture, layerUV);
-    float sd = approximateSDF(blurred.a, uThickness);
+  // SDF aus geblurrter Matte
+  float blurredA = texture(uForegroundBlurredTexture, layerUV).a;
+  float sd = approximateSDF(blurredA, uThickness);
 
-    // Normale rekonstruieren
-    vec3 normal = getNormal(layerLocalCoord, uThickness);
+  // Normale aus Matte rekonstruieren
+  vec3 normal = getNormal(layerLocal, uThickness);
 
-    // Glas-Rendering (Blur erfolgt in shared.glsl über Impeller-Uniforms)
-    fragColor = renderLiquidGlass(
-        screenUV,
-        FlutterFragCoord().xy,
-        vec2(u_size_x, u_size_y),
-        sd,
-        uThickness,
-        uRefractiveIndex,
-        uChromaticAberration,
-        uGlassColor,
-        uLightAngle,
-        uLightIntensity,
-        uAmbientStrength,
-        uBackgroundTexture,
-        normal,
-        foregroundColor.a,
-        /*gaussianBlurSigmaPx*/ uGaussianBlur,  // ignoriert, API-kompatibel
-        /*kawaseSteps*/          uKawaseSteps,  // ignoriert, API-kompatibel
-        uSaturation,
-        uLightness
-    );
+  // Glas-Rendering (CA + Impeller-Blur in shared.glsl)
+  fragColor = renderLiquidGlass(
+      screenUV,
+      p,
+      uSize,                     // sizePx
+      sd,
+      uThickness,
+      uRefractiveIndex,
+      uChromaticAberration,
+      uGlassColor,
+      uLightDirection,
+      uLightIntensity,
+      uAmbientStrength,
+      uBackgroundTexture,
+      normal,
+      fg.a,                      // foregroundAlpha = Matte
+      uSaturation,
+      uLightness
+  );
 
 #if DEBUG_NORMALS
-    fragColor = debugNormals(fragColor, normal, true);
+  // simple visualization: overlay normal as color
+  fragColor.rgb = mix(fragColor.rgb, normalize(normal) * 0.5 + 0.5, 0.6);
 #endif
 
 #if DEBUG_BLUR_MATTE
-    fragColor = mix(fragColor, blurred, 0.99);
+  vec4 blurredTex = texture(uForegroundBlurredTexture, layerUV);
+  fragColor = mix(fragColor, blurredTex, 0.95);
 #endif
 }

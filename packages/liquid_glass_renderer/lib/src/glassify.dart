@@ -134,7 +134,6 @@ class RenderGlassify extends RenderProxyBox {
     _ticker = _tickerProvider.createTicker((_) => markNeedsPaint());
   }
 
-  // ── State
   double _devicePixelRatio;
   set devicePixelRatio(double value) {
     if (_devicePixelRatio == value) return;
@@ -400,14 +399,13 @@ class _GlassifyShaderLayer extends OffsetLayer {
 
       // ───────── PASS 1: H (gaussian_1d_blur.frag) — NUR wenn sigma>0 ─────────
       if (sigmaPx > 0.0) {
-        // u_size_x / u_size_y (locations 0/1)
         _shaderH
-          ..setFloat(0, screenDevice.width)
-          ..setFloat(1, screenDevice.height)
-          ..setFloat(2, 1.0) // u_dir.x
+          ..setFloat(0, screenDevice.width) // u_size.x
+          ..setFloat(1, screenDevice.height) // u_size.y
+          ..setFloat(2, 1.0) // u_dir.x (H)
           ..setFloat(3, 0.0) // u_dir.y
           ..setFloat(4, n.toDouble()) // u_sample_count
-          ..setFloat(5, 0.0); // clamp
+          ..setFloat(5, 0.0); // u_tile_mode (clamp)
 
         int baseH = 6;
         for (int i = 0; i < n; i++) {
@@ -423,7 +421,6 @@ class _GlassifyShaderLayer extends OffsetLayer {
           ImageFilter.shader(_shaderH),
           oldLayer: _hEngineLayer,
         );
-        // H bleibt offen – V wird innen geschachtelt.
         hIsOpen = true;
       } else {
         _hEngineLayer = null;
@@ -456,66 +453,76 @@ class _GlassifyShaderLayer extends OffsetLayer {
     final fgW = layerSize.width * devicePixelRatio;
     final fgH = layerSize.height * devicePixelRatio;
 
-    // Sampler 1/2: Matte (scharf / blurred)
+    // Sampler binden: 0 = Backdrop (automatisch vom BackdropFilter),
+    // 1 = uForegroundTexture, 2 = uForegroundBlurredTexture
     _shaderV
       ..setImageSampler(1, childImage!)
       ..setImageSampler(2, childBlurredImage!);
 
-    // 0..1: uSizeW/H (Screen, DEVICE-Px)
+    // ── HEADER (identisch zu liquid_glass.frag) ───────────────────────────────
+    // layout(location = 0) vec2 uSize;           // wird von Flutter gesetzt → NICHT setzen
+    // layout(location = 1) vec4 uGlassColor;     // slots  2..5
     _shaderV
-      ..setFloat(0, screenDevice.width)
-      ..setFloat(1, screenDevice.height);
+      ..setFloat(2, settings.glassColor.r)
+      ..setFloat(3, settings.glassColor.g)
+      ..setFloat(4, settings.glassColor.b)
+      ..setFloat(5, settings.glassColor.a);
 
-    // 2..3: uForegroundSizeW/H (DEVICE-Px)
+    // layout(location = 2) vec4 uOpticalProps;   // slots  6..9
     _shaderV
-      ..setFloat(2, fgW)
-      ..setFloat(3, fgH);
+      ..setFloat(6, settings.refractiveIndex)
+      ..setFloat(7, settings.chromaticAberration)
+      ..setFloat(8, settings.thickness)
+      ..setFloat(9, 0.0); // blend ist bei Arbitrary egal
 
-    // 4..13: Material/Licht/Physik
+    // layout(location = 3) vec4 uLightConfig;    // slots 10..13
     _shaderV
-      ..setFloat(4, settings.chromaticAberration)
-      ..setFloat(5, settings.glassColor.r)
-      ..setFloat(6, settings.glassColor.g)
-      ..setFloat(7, settings.glassColor.b)
-      ..setFloat(8, settings.glassColor.a)
-      ..setFloat(9, settings.lightAngle)
-      ..setFloat(10, settings.lightIntensity)
-      ..setFloat(11, settings.ambientStrength)
-      ..setFloat(12, settings.thickness)
-      ..setFloat(13, settings.refractiveIndex);
+      ..setFloat(10, settings.lightAngle) // legacy; Richtung kommt unten
+      ..setFloat(11, settings.lightIntensity)
+      ..setFloat(12, settings.ambientStrength)
+      ..setFloat(13, settings.saturation);
 
-    // 14..15: uOffset (global in DEVICE-Px)
+    // layout(location = 4) vec2 uColorAdjust;    // slots 14..15
     _shaderV
-      ..setFloat(14, globalOffset.dx * devicePixelRatio)
-      ..setFloat(15, globalOffset.dy * devicePixelRatio);
+      ..setFloat(14, settings.lightness)
+      ..setFloat(15, 0.0); // numShapes ungenutzt
 
-    // 16..17: Sättigung/Lightness
+    // layout(location = 5) vec2 uLightDirection; // slots 16..17
+    final lx = math.cos(settings.lightAngle);
+    final ly = math.sin(settings.lightAngle);
     _shaderV
-      ..setFloat(16, settings.saturation)
-      ..setFloat(17, settings.lightness);
+      ..setFloat(16, lx)
+      ..setFloat(17, ly);
 
-    // 18..19: Legacy-Blur (API-kompatibel, wird intern ignoriert)
+    // ── MATTE-UNIFORMS direkt hinter dem Header ───────────────────────────────
+    // layout(location = 6) vec2 uForegroundSize; // slots 18..19
     _shaderV
-      ..setFloat(18, settings.blur)
-      ..setFloat(19, -1.0);
+      ..setFloat(18, fgW)
+      ..setFloat(19, fgH);
 
-    // 20..: Impeller-Uniforms für V-Pass (EXAKT wie gaussian_1d_blur.frag)
+    // layout(location = 7) vec2 uOffset;         // slots 20..21
+    _shaderV
+      ..setFloat(20, globalOffset.dx * devicePixelRatio)
+      ..setFloat(21, globalOffset.dy * devicePixelRatio);
+
+    // ── IMPeller-Blur-Uniforms (NACH HINTEN, wie im Shader) ───────────────────
     final n = kernel.length.clamp(1, _kMaxKernel);
-    _shaderV
-      ..setFloat(20, screenDevice.width) // u_size_x
-      ..setFloat(21, screenDevice.height) // u_size_y
-      ..setFloat(22, 0.0) // u_dir_x (0=vertikal)
-      ..setFloat(23, 1.0) // u_dir_y
-      ..setFloat(24, n.toDouble()) // u_sample_count
-      ..setFloat(25, 0.0); // u_tile_mode (clamp)
 
-    int base = 26;
+    // layout(location = 102..105): skalare
+    _shaderV
+      ..setFloat(102, 0.0) // u_dir_x  (V)
+      ..setFloat(103, 1.0) // u_dir_y
+      ..setFloat(104, n.toDouble()) // u_sample_count
+      ..setFloat(105, 0.0); // u_tile_mode = clamp
+
+    // layout(location = 106) u_samples[50] (vec4 je Sample)
+    int base = 106;
     for (int i = 0; i < n; i++) {
       final s = kernel[i];
       _shaderV
-        ..setFloat(base + i * 4 + 0, s.tPx)
+        ..setFloat(base + i * 4 + 0, s.tPx) // x = Offset (Pixel)
         ..setFloat(base + i * 4 + 1, 0.0)
-        ..setFloat(base + i * 4 + 2, s.w)
+        ..setFloat(base + i * 4 + 2, s.w) // z = Gewicht
         ..setFloat(base + i * 4 + 3, 0.0);
     }
   }
@@ -584,9 +591,8 @@ class _GlassifyShaderLayer extends OffsetLayer {
 
   void _addCoverageQuad(ui.SceneBuilder builder) {
     final pic = _buildCoveragePicture(layerSize);
-    // wichtig: in dieser Layer (wir sind schon in pushOffset(offset))
     builder.addPicture(Offset.zero, pic);
-    pic.dispose(); // Picture direkt freigeben
+    pic.dispose();
   }
 
   @override

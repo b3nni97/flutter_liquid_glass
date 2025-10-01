@@ -5,8 +5,8 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter_shaders/flutter_shaders.dart';
+import 'package:liquid_glass_renderer/src/glass_link.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_settings.dart';
 import 'package:liquid_glass_renderer/src/raw_shapes.dart';
@@ -19,11 +19,16 @@ class LiquidGlassLayer extends StatefulWidget {
   const LiquidGlassLayer({
     required this.child,
     this.settings = const LiquidGlassSettings(),
+    this.restrictThickness = true,
     super.key,
   });
 
   final Widget child;
   final LiquidGlassSettings settings;
+
+  /// If true, clamp thickness to the shortest side of the smallest shape.
+  /// Prevents artifacts on very thin/small shapes.
+  final bool restrictThickness;
 
   @override
   State<LiquidGlassLayer> createState() => _LiquidGlassLayerState();
@@ -51,7 +56,7 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer>
           blurH: blurH,
           settings: widget.settings,
           debugRenderRefractionMap: false,
-          vsync: this,
+          restrictThickness: widget.restrictThickness,
           child: child!,
         ),
         child: child,
@@ -67,7 +72,7 @@ class _RawShapes extends SingleChildRenderObjectWidget {
     required this.blurH,
     required this.settings,
     required this.debugRenderRefractionMap,
-    required this.vsync,
+    required this.restrictThickness,
     required Widget super.child,
   });
 
@@ -75,7 +80,7 @@ class _RawShapes extends SingleChildRenderObjectWidget {
   final FragmentShader blurH;
   final LiquidGlassSettings settings;
   final bool debugRenderRefractionMap;
-  final TickerProvider vsync;
+  final bool restrictThickness;
 
   @override
   RenderObject createRenderObject(BuildContext context) {
@@ -85,7 +90,7 @@ class _RawShapes extends SingleChildRenderObjectWidget {
       blurH: blurH,
       settings: settings,
       debugRenderRefractionMap: debugRenderRefractionMap,
-      ticker: vsync,
+      restrictThickness: restrictThickness,
     );
   }
 
@@ -97,17 +102,16 @@ class _RawShapes extends SingleChildRenderObjectWidget {
     renderObject
       ..devicePixelRatio = MediaQuery.devicePixelRatioOf(context)
       ..settings = settings
-      ..ticker = vsync
       ..debugRenderRefractionMap = debugRenderRefractionMap
-      ..setShaders(shader, blurH); // wichtig: neue Instanzen übernehmen
+      ..restrictThickness = restrictThickness
+      ..setShaders(shader, blurH); // neue Instanzen übernehmen
   }
 }
 
-/// Maximum number of shapes supported per layer due to Flutter's uniform limit
-const int _maxShapesPerLayer = 64;
+/// Maximum number of shapes supported per layer due to Impeller's uniform limit
+const int _maxShapesPerLayer = 16;
 
 // ────────────────────────── Top-Level Helper-Klassen ──────────────────────────
-// (NICHT in die Render-Klasse hineinlegen!)
 class _RawS {
   _RawS(this.x, this.w);
   double x; // Offset in Pixeln
@@ -128,39 +132,43 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     required FragmentShader shader, // liquid_glass.frag (V-Pass + Extras)
     required FragmentShader blurH, // gaussian_1d_blur.frag (H-Pass)
     required LiquidGlassSettings settings,
-    required TickerProvider ticker,
+    required bool restrictThickness,
     bool debugRenderRefractionMap = false,
   })  : _devicePixelRatio = devicePixelRatio,
         _shader = shader,
         _blurH = blurH,
         _settings = settings,
-        _tickerProvider = ticker,
-        _debugRenderRefractionMap = debugRenderRefractionMap;
+        _debugRenderRefractionMap = debugRenderRefractionMap,
+        _restrictThickness = restrictThickness,
+        _glassLink = GlassLink() {
+    _glassLink.addListener(_onGlassLinkChanged);
+  }
 
   // -------------------- Konstanten / Layout --------------------
-  static const int _maxShapesPerLayer = 64;
-  static const int _shapeDataBaseLocation = 224;
-  static const double _eps = 0.01; // <─ war bei dir "undefined"
+  // Shader-Layout:
+  //  0:  uSize (vec2) — von Flutter gesetzt (nicht manuell setzen!)
+  //  1:  uGlassColor   (vec4) → floats  2..5
+  //  2:  uOpticalProps (vec4) → floats  6..9
+  //  3:  uLightConfig  (vec4) → floats 10..13
+  //  4:  uColorAdjust  (vec2) → floats 14..15
+  //  5:  uLightDirection(vec2)→ floats 16..17
+  //  6:  uShapeData[96]       → floats 18..113  (16*6)
+  // 102: u_dir_x               → float 114
+  // 103: u_dir_y               → float 115
+  // 104: u_sample_count        → float 116
+  // 105: u_tile_mode           → float 117
+  // 106: u_samples[0] (vec4)   → float 118, dann +4 je Sample
+  static const int _shapeDataBaseFloat = 18; // = first float of uShapeData
+  static const int _blurBaseFloat = 114; // u_dir_x Start
+  static const int _blurSamplesFloat = 118; // u_samples[0]
 
-  // -------------------- Registry -------------------------------
-  static final Expando<RenderLiquidGlassLayer> layerRegistry = Expando();
-  final Set<RenderLiquidGlass> registeredShapes = {};
+  static const double _eps = 0.01;
 
-  void registerShape(RenderLiquidGlass shape) {
-    if (registeredShapes.length >= _maxShapesPerLayer) {
-      throw UnsupportedError('Only $_maxShapesPerLayer shapes are supported!');
-    }
-    registeredShapes.add(shape);
-    layerRegistry[shape] =
-        this; // <─ damit RenderLiquidGlassLayer.layerRegistry[this] funktioniert
-    markNeedsPaint();
-  }
+  // -------------------- GlassLink / Registrierung --------------
+  final GlassLink _glassLink;
+  GlassLink get glassLink => _glassLink;
 
-  void unregisterShape(RenderLiquidGlass shape) {
-    registeredShapes.remove(shape);
-    layerRegistry[shape] = null;
-    markNeedsPaint();
-  }
+  void _onGlassLinkChanged() => markNeedsPaint();
 
   // -------------------- State / Shader / Settings --------------
   double _devicePixelRatio;
@@ -168,9 +176,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   FragmentShader _blurH; // gaussian_1d_blur.frag
   LiquidGlassSettings _settings;
   bool _debugRenderRefractionMap;
-  TickerProvider _tickerProvider;
+  bool _restrictThickness;
 
-  // ── Setter für dein Cascade in updateRenderObject ────────────
   set devicePixelRatio(double value) {
     if (_devicePixelRatio == value) return;
     _devicePixelRatio = value;
@@ -183,15 +190,15 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     markNeedsPaint();
   }
 
-  set ticker(TickerProvider value) {
-    if (identical(_tickerProvider, value)) return;
-    _tickerProvider = value;
-    markNeedsPaint();
-  }
-
   set debugRenderRefractionMap(bool value) {
     if (_debugRenderRefractionMap == value) return;
     _debugRenderRefractionMap = value;
+    markNeedsPaint();
+  }
+
+  set restrictThickness(bool value) {
+    if (_restrictThickness == value) return;
+    _restrictThickness = value;
     markNeedsPaint();
   }
 
@@ -215,23 +222,24 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   // -------------------- Shapes sammeln -------------------------
   List<(RenderLiquidGlass, RawShape)> collectShapes() {
     final result = <(RenderLiquidGlass, RawShape)>[];
-    for (final shapeRender in registeredShapes) {
-      if (shapeRender.attached && shapeRender.hasSize) {
-        try {
-          final transform = shapeRender.getTransformTo(null);
-          final rect = MatrixUtils.transformRect(
-              transform, Offset.zero & shapeRender.size);
-          result.add((
-            shapeRender,
-            RawShape.fromLiquidGlassShape(
-              shapeRender.shape,
-              center: rect.center,
-              size: rect.size,
-            ),
-          ));
-        } catch (e) {
-          debugPrint('Failed to collect shape: $e');
-        }
+
+    final computed = _glassLink.computedShapes;
+
+    if (computed.length > _maxShapesPerLayer) {
+      throw UnsupportedError('Only $_maxShapesPerLayer shapes are supported!');
+    }
+
+    for (final s in computed) {
+      final ro = s.renderObject;
+      if (ro is RenderLiquidGlass) {
+        result.add((
+          ro,
+          RawShape.fromLiquidGlassShape(
+            s.shape,
+            center: s.globalBounds.center,
+            size: s.globalBounds.size,
+          ),
+        ));
       }
     }
     return result;
@@ -246,7 +254,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
           MatrixUtils.transformRect(transformToThis, Offset.zero & ro.size);
       union = (union == null) ? rectLocal : union!.expandToInclude(rectLocal);
     }
-    // kleiner Sicherheitsrand (du kannst hier 3*σ(DevicePx) -> DIP addieren)
+    // Sicherheitsrand: 3*σ + thickness + Puffer
     final double margin = (_settings.blur * 3.0) + _settings.thickness + 12.0;
     return (union ?? Rect.zero).inflate(margin);
   }
@@ -389,35 +397,50 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     final settingsChanged = _lastSettings != _settings;
     final shapesChanged = _shapesChanged(shapes);
 
+    // thickness ggf. clampen (restrictThickness)
+    var thickness = _settings.thickness;
+    if (_restrictThickness && shapes.isNotEmpty) {
+      final smallest = shapes
+          .map((e) => e.$2.size.shortestSide)
+          .reduce((a, b) => a < b ? a : b);
+      thickness = math.min(thickness, smallest);
+    }
+
     if (!settingsChanged && !shapesChanged) {
-      _shader.setFloat(13, shapeCount.toDouble()); // uNumShapes
+      // shapeCount wird immer aktualisiert
+      _shader.setFloat(15, shapeCount.toDouble()); // count an float 15
       return;
     }
     _lastSettings = _settings;
 
+    // Packed Header (Float-Indizes, NICHT locations):
     _shader
-      ..setFloat(2, _settings.chromaticAberration)
-      ..setFloat(3, _settings.glassColor.r)
-      ..setFloat(4, _settings.glassColor.g)
-      ..setFloat(5, _settings.glassColor.b)
-      ..setFloat(6, _settings.glassColor.a)
-      ..setFloat(7, _settings.lightAngle)
-      ..setFloat(8, _settings.lightIntensity)
-      ..setFloat(9, _settings.ambientStrength)
-      ..setFloat(10, _settings.thickness)
-      ..setFloat(11, _settings.refractiveIndex)
-      ..setFloat(12, _settings.blend * _devicePixelRatio)
-      ..setFloat(13, shapeCount.toDouble())
-      ..setFloat(14, _settings.saturation)
-      ..setFloat(15, _settings.lightness)
-      ..setFloat(16,
-          _settings.performanceBlur ? _settings.blur * _devicePixelRatio : 0.0)
-      ..setFloat(17,
-          _settings.performanceBlur ? (_settings.kawaseSteps ?? -1.0) : -1.0);
+      // uGlassColor (vec4) 2..5
+      ..setFloat(2, _settings.glassColor.r)
+      ..setFloat(3, _settings.glassColor.g)
+      ..setFloat(4, _settings.glassColor.b)
+      ..setFloat(5, _settings.glassColor.a)
+      // uOpticalProps (vec4) 6..9
+      ..setFloat(6, _settings.refractiveIndex)
+      ..setFloat(7, _settings.chromaticAberration)
+      ..setFloat(8, thickness)
+      ..setFloat(9, _settings.blend * _devicePixelRatio)
+      // uLightConfig (vec4) 10..13
+      ..setFloat(10, _settings.lightAngle)
+      ..setFloat(11, _settings.lightIntensity)
+      ..setFloat(12, _settings.ambientStrength)
+      ..setFloat(13, _settings.saturation)
+      // uColorAdjust (vec2) 14..15
+      ..setFloat(14, _settings.lightness)
+      ..setFloat(15, shapeCount.toDouble())
+      // uLightDirection (vec2) 16..17
+      ..setFloat(16, math.cos(_settings.lightAngle))
+      ..setFloat(17, math.sin(_settings.lightAngle));
 
+    // Shapes: je 6 floats ab 18
     for (var i = 0; i < shapeCount; i++) {
       final shape = i < shapes.length ? shapes[i].$2 : RawShape.none;
-      final base = _shapeDataBaseLocation + (i * 6);
+      final base = _shapeDataBaseFloat + (i * 6); // 18 + i*6
       _shader
         ..setFloat(base + 0, shape.type.index.toDouble())
         ..setFloat(base + 1, shape.center.dx * _devicePixelRatio)
@@ -444,10 +467,10 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
   @override
   void paint(PaintingContext context, Offset offset) {
-    // Shapes einsammeln
+    // Shapes einsammeln (über GlassLink)
     final shapes = collectShapes();
 
-    // Early-out: kein Glas / keine Shapes
+    // Early-out: kein Glas oder keine Shapes
     if (_settings.thickness <= 0 || shapes.isEmpty) {
       _hHandle.layer = null;
       _vHandle.layer = null;
@@ -478,14 +501,13 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     final Rect bounds = _snapRectToDeviceFull(rawBounds);
 
     // σ in Device-Pixeln (Impeller-Kernel)
-    final double sigmaPx =
-        (_settings.performanceBlur ? _settings.blur * _devicePixelRatio : 0.0);
+    final double sigmaPx = _settings.blur * _devicePixelRatio;
 
     context.pushClipPath(
-      true, // needsCompositing
-      offset, // offset
-      bounds, // clip rect
-      clipPath, // clip path
+      true,
+      offset,
+      bounds,
+      clipPath,
       (ctx, off) {
         final Size screenLogical = RendererBinding.instance.renderView.size;
         final Size screenDevice = Size(
@@ -532,36 +554,28 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
           _hHandle.layer = null;
         }
 
-        // ---------- PASS 2: V-Blur (liquid_glass.frag) ----------
+        // ---------- PASS 2: V-Blur + Glas (liquid_glass.frag) ----------
         if (sigmaPx > 0.0 || true) {
           final kV = _computeImpellerKernel(sigmaPx); // tPx,w
           final int nV = math.min(_impellerMaxKernel, kV.length);
 
-          // feste Locations wie in liquid_glass.frag definiert:
-          // 18..19: u_size_x / u_size_y
+          // u_dir = (0,1), u_sample_count, tile_mode=0
           _shader
-            ..setFloat(18, screenDevice.width) // u_size_x
-            ..setFloat(19, screenDevice.height); // u_size_y
+            ..setFloat(_blurBaseFloat + 0, 0.0) // u_dir_x @114
+            ..setFloat(_blurBaseFloat + 1, 1.0) // u_dir_y @115
+            ..setFloat(_blurBaseFloat + 2, nV.toDouble()) // u_sample_count @116
+            ..setFloat(_blurBaseFloat + 3, 0.0); // u_tile_mode @117
 
-          // 20..21: u_dir = (0,1)
-          _shader
-            ..setFloat(20, 0.0) // u_dir_x
-            ..setFloat(21, 1.0); // u_dir_y
-
-          // 22: u_sample_count, 23: u_tile_mode (0=clamp)
-          _shader
-            ..setFloat(22, nV.toDouble())
-            ..setFloat(23, 0.0);
-
-          // 24.. : u_samples[i] = vec4(tPx, 0, w, 0)
-          int baseV = 24;
+          // u_samples[i] = vec4(tPx, 0, w, 0) ab 118
+          int baseV = _blurSamplesFloat;
           for (int i = 0; i < nV; i++) {
             final s = kV[i];
             _shader
-              ..setFloat(baseV + i * 4 + 0, s.tPx)
-              ..setFloat(baseV + i * 4 + 1, 0.0)
-              ..setFloat(baseV + i * 4 + 2, s.w)
-              ..setFloat(baseV + i * 4 + 3, 0.0);
+              ..setFloat(baseV + 0, s.tPx)
+              ..setFloat(baseV + 1, 0.0)
+              ..setFloat(baseV + 2, s.w)
+              ..setFloat(baseV + 3, 0.0);
+            baseV += 4;
           }
 
           final BackdropFilterLayer vLayer =
@@ -583,6 +597,14 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     );
 
     super.paint(context, offset);
+  }
+
+  @override
+  void dispose() {
+    _glassLink
+      ..removeListener(_onGlassLinkChanged)
+      ..dispose();
+    super.dispose();
   }
 
   // -------------------- Inhalte malen --------------------------

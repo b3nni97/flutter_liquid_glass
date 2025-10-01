@@ -19,9 +19,5 @@ final String arbitraryShader =
     '${_shadersRoot}lib/assets/shaders/liquid_glass_arbitrary.frag';
 
 @internal
-final String gauss1dLinearShader =
-    '${_shadersRoot}lib/assets/shaders/gauss1d_linear.frag';
-
-@internal
 final String gaussian1dBlurShader =
     '${_shadersRoot}lib/assets/shaders/gaussian_1d_blur.frag';
