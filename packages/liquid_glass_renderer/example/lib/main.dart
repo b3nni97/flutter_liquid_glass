@@ -76,7 +76,7 @@ class MainApp extends HookWidget {
         },
       },
       child: MaterialApp(
-        // showPerformanceOverlay: true,
+        showPerformanceOverlay: true,
         debugShowCheckedModeBanner: false,
         theme: ThemeData.from(
           colorScheme: colorScheme,

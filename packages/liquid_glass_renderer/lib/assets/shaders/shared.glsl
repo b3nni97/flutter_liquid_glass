@@ -13,11 +13,41 @@
 #define MAX_VSAMPLES 64
 #endif
 
+// Performance/Quality-Schalter (Host kann sie per #define überschreiben)
+#ifndef LG_CA_VIS_THRESHOLD
+#define LG_CA_VIS_THRESHOLD 1e-3  // Schwelle für sichtbare CA (ca*dispLenPx)
+#endif
+#ifndef LG_USE_EXPLICIT_LOD
+#define LG_USE_EXPLICIT_LOD 0     // 1 = textureLod mit Bias bei starker Refraktion
+#endif
+#ifndef LG_LOD_BIAS_SCALE
+#define LG_LOD_BIAS_SCALE 0.75
+#endif
+
+// CA vollständig Gaussian (pass-kompatibel, keine Kawase-Zweige)
+#ifndef LG_CA_PASS_MODE
+// 0=beide Pässe, 1=nur vertikal (|u_dir_y|>=|u_dir_x|), 2=nur horizontal
+#define LG_CA_PASS_MODE 1
+#endif
+
+// numerische Stabilität
+#ifndef LG_EPS
+#define LG_EPS 1e-8
+#endif
+
 // ---------- Small utils ----------
 float hash12(vec2 p){
   vec3 q = fract(vec3(p.xyx) * 0.1031);
   q += dot(q, q.yzx + 33.33);
   return fract((q.x + q.y) * q.z);
+}
+vec2 lg_norm2(vec2 v){
+  float d = max(dot(v, v), LG_EPS);
+  return v * inversesqrt(d);
+}
+vec3 lg_norm3(vec3 v){
+  float d = max(dot(v, v), LG_EPS);
+  return v * inversesqrt(d);
 }
 
 // ---------- sRGB helpers (define once) ----------
@@ -52,11 +82,8 @@ vec2  mirror01(vec2 uv){ return vec2(mirror1(uv.x), mirror1(uv.y)); }
 #endif
 
 // ---------- Impeller-Identisches Tiling (für Gaussian 1D) ----------
-// HINWEIS: Die hier verwendeten Uniforms (u_size_x, u_size_y, u_dir_*, u_samples, …)
-// müssen im Host-Shader (liquid_glass.frag) VOR dem include deklariert sein.
 vec2 tile_uv_mode(vec2 uv, vec2 size, float mode){
   if (mode < 0.5) {
-    // clamp-with-epsilon wie Impeller
     vec2 eps = 0.5 / size;
     return clamp(uv, eps, vec2(1.0) - eps);
   } else if (mode < 1.5) {
@@ -65,8 +92,7 @@ vec2 tile_uv_mode(vec2 uv, vec2 size, float mode){
     vec2 m = mod(uv, 2.0);
     return mix(m, 2.0 - m, step(1.0, m));
   } else {
-    // decal: uv bleibt roh, OOB wird separat 0
-    return uv;
+    return uv; // decal: uv bleibt roh, OOB wird separat 0
   }
 }
 vec4 sample_uv_mode(sampler2D tex, vec2 uv, vec2 size, float mode){
@@ -79,15 +105,9 @@ vec4 sample_uv_mode(sampler2D tex, vec2 uv, vec2 size, float mode){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-//  EXAKTER Gaussian 1D nach Impeller (liest Impeller-Uniforms)
+/*  EXAKTER Gaussian 1D nach Impeller (liest Impeller-Uniforms)  */
 // ────────────────────────────────────────────────────────────────────────────
 vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
-  // im Host deklariert:
-  //   uniform float u_size_x, u_size_y;
-  //   uniform float u_dir_x,  u_dir_y;
-  //   uniform float u_sample_count, u_tile_mode;
-  //   uniform vec4  u_samples[50];
-
   vec2 pixel    = vec2(1.0 / uSize.x, 1.0 / uSize.y);
   vec2 step_vec = vec2(u_dir_x * pixel.x, u_dir_y * pixel.y);
 
@@ -112,16 +132,28 @@ vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
 
   if (wsum > 1e-6) return sum / wsum;
 
-  // Fallback (clamp with epsilon)
   vec2 eps = vec2(0.5 / uSize.x, 0.5 / uSize.y);
   return texture(tex, clamp(baseUV, eps, vec2(1.0) - eps));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Lighting / Color (seine Versionen)
+// Pass-Logik für CA (um Doppelung im separablen Blur zu meiden)
 // ────────────────────────────────────────────────────────────────────────────
+bool _shouldApplyCA(){
+#if LG_CA_PASS_MODE == 0
+  return true;
+#elif LG_CA_PASS_MODE == 1
+  // nur im vertikalen Pass (|dir_y| dominiert)
+  return (abs(u_dir_y) >= abs(u_dir_x));
+#else
+  // nur im horizontalen Pass
+  return (abs(u_dir_x) > abs(u_dir_y));
+#endif
+}
 
-// Determine highlight color with gradual transition from colored to white
+// ────────────────────────────────────────────────────────────────────────────
+// Lighting / Color
+// ────────────────────────────────────────────────────────────────────────────
 vec3 getHighlightColor(vec3 backgroundColor, float targetBrightness) {
   float luminance = dot(backgroundColor, vec3(0.299, 0.587, 0.114));
 
@@ -131,7 +163,7 @@ vec3 getHighlightColor(vec3 backgroundColor, float targetBrightness) {
 
   vec3 coloredHighlight = vec3(targetBrightness);
   if (luminance > 0.001) {
-    vec3 normalizedBackground = backgroundColor / luminance;
+    vec3 normalizedBackground = backgroundColor / max(luminance, 1e-6);
     coloredHighlight = normalizedBackground * targetBrightness;
     float saturationBoost = 1.3;
     vec3 gray = vec3(dot(coloredHighlight, vec3(0.299, 0.587, 0.114)));
@@ -164,7 +196,7 @@ float calculateDispersiveIndex(float baseIndex, float chromaticAberration, float
   return baseIndex - B / wavelengthSq - C / wavelengthQuad;
 }
 
-// Seine Lighting (mit vec2 lightDirection und rationalem Rim-Falloff)
+// Lighting (leicht beschleunigt durch lg_norm2)
 vec3 calculateLighting(
   vec2 uv, vec3 normal, float sd, float thickness, float height,
   vec2 lightDirection, float lightIntensity, float ambientStrength,
@@ -183,14 +215,14 @@ vec3 calculateLighting(
   float rimFactor = 1.0 / (1.0 + k * x * x);
   if (rimFactor < 0.01 || lightIntensity < 0.01) return vec3(0.0);
 
-  vec2 L = lightDirection;
-  vec2 nxy = normalize(normal.xy);
+  vec2 L   = lightDirection;
+  vec2 nxy = lg_norm2(normal.xy);
 
   float mainL = max(0.0, dot(nxy,  L));
   float oppL  = max(0.0, dot(nxy, -L));
   float total = mainL + oppL * 0.8;
 
-  vec3 hl            = getHighlightColor(backgroundColor, 0.7);
+  vec3 hl             = getHighlightColor(backgroundColor, 0.7);
   vec3 directionalRim = hl * (total * total) * lightIntensity * 2.0;
   vec3 ambientRim     = getHighlightColor(backgroundColor, 0.4) * ambientStrength;
 
@@ -198,7 +230,7 @@ vec3 calculateLighting(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Refraction + Chromatic Aberration (Variante A) mit Impeller-Blur
+// Refraction + Chromatic Aberration (alles Gaussian, pass-kompatibel)
 // ────────────────────────────────────────────────────────────────────────────
 vec4 calculateRefraction(
   vec2 screenUV, vec3 normal, float height, float thickness,
@@ -217,70 +249,57 @@ vec4 calculateRefraction(
   refractionDisplacement = dispPx / sizePx;      // in UV
   vec2 uvBase = screenUV + refractionDisplacement;
 
-  // 2) Einmal Gaussian (G + A)
+  // Basis: einmal Gaussian (Impeller) → G & A (H/V-separabel)
   vec4 gS = applyGaussian1D_Impeller(backgroundTexture, uvBase);
 
-  // 3) CA: streng skalierbar, und komplett aus bei sehr kleinen Werten
+  // CA-Gating
   float ca = max(chromaticAberration, 0.0);
-  if (ca < 1e-4) {
-    // exakte "keine CA" Ausgabe
-    return gS;
+  float dispLenPx = length(dispPx);
+  if (ca * dispLenPx < LG_CA_VIS_THRESHOLD || !_shouldApplyCA()) {
+    return gS; // unsichtbar oder falscher Pass → Basis behalten
   }
 
-  // Richtung in UV; wenn Disp sehr klein -> CA verschwindet automatisch
-  float dispLenPx = length(dispPx);
-  vec2 dirUV = normalize(refractionDisplacement + 1e-12);
+  // Richtung in UV, robust normalisiert
+  vec2 dirUV = lg_norm2(refractionDisplacement + vec2(LG_EPS, LG_EPS));
 
-  // Offsetgröße rein proportional zu CA und Displänge
-  // Skala anpassen: 1.5 ist ein guter Start; clamp gegen Ausreißer
+  // Offsetgröße proportional zu CA und Displänge; clamp gegen Ausreißer
   float caPixels = clamp(dispLenPx * (1.5 * ca), 0.0, 6.0);
-  // in UV umrechnen (Nutzung der kürzeren Bildkante verhindert Übertreibung)
   float shortSide = max(1.0, min(sizePx.x, sizePx.y));
   vec2  caUV      = dirUV * (caPixels / shortSide);
 
-  // R vor / B zurück, günstige 3-Tap-Glättung
-  vec2 uvR = uvBase + caUV;
-  vec2 uvB = uvBase - caUV;
+  // Optionales LOD-Bias
+  #if LG_USE_EXPLICIT_LOD
+    float lodBias = clamp(LG_LOD_BIAS_SCALE * caPixels / 2.0, 0.0, 3.5);
+    #define SAMPLE_GAUSS_AT(_uv) textureLod(backgroundTexture, clamp((_uv), vec2(0.0), vec2(1.0)), lodBias)
+  #else
+    #define SAMPLE_GAUSS_AT(_uv) applyGaussian1D_Impeller(backgroundTexture, (_uv))
+  #endif
 
-  vec3 r0 = texture(backgroundTexture, uvR).rgb;
-  vec3 r1 = texture(backgroundTexture, uvR - 0.5*caUV).rgb;
-  vec3 r2 = texture(backgroundTexture, uvR + 0.5*caUV).rgb;
-  float r = (r0.r + r1.r + r2.r) / 3.0;
+  // Zwei zusätzliche Gaussian-Samples: einmal für R (vorwärts), einmal für B (rückwärts)
+  float r = SAMPLE_GAUSS_AT(uvBase + caUV).r;
+  float b = SAMPLE_GAUSS_AT(uvBase - caUV).b;
 
-  vec3 b0 = texture(backgroundTexture, uvB).rgb;
-  vec3 b1 = texture(backgroundTexture, uvB - 0.5*caUV).rgb;
-  vec3 b2 = texture(backgroundTexture, uvB + 0.5*caUV).rgb;
-  float b = (b0.b + b1.b + b2.b) / 3.0;
+  #undef SAMPLE_GAUSS_AT
 
-  // 4) R/B nur anteilig beimischen → bei ca=0 exakt gS.rgb
+  // G/Alpha aus Basis, R/B anteilig mischen → bei ca=0 exakt gS
   float mixAmt = clamp(ca, 0.0, 1.0);
   float outR = mix(gS.r, r, mixAmt);
-  float outG = gS.g;    // Referenz (geblurter G)
+  float outG = gS.g;
   float outB = mix(gS.b, b, mixAmt);
 
   return vec4(outR, outG, outB, gS.a);
 }
 
-
-
 // Apply saturation and lightness adjustments to a color
 vec3 applySaturationLightness(vec3 color, float saturation, float lightness){
-  // Luminanz
   float luminance = dot(color, vec3(0.299, 0.587, 0.114));
-
-  // Sättigung anwenden (1.0 = keine Änderung)
   vec3 saturatedColor = mix(vec3(luminance), color, saturation);
-
-  // Lightness anwenden (1.0 = keine Änderung)
   vec3 adjustedColor;
   if (lightness > 1.0) {
-    // aufhellen: Richtung Weiß
     adjustedColor = mix(saturatedColor, vec3(1.0), lightness - 1.0);
   } else {
-    // abdunkeln: Richtung Schwarz
     adjustedColor = saturatedColor * lightness;
   }
-
   return clamp(adjustedColor, 0.0, 1.0);
 }
 
@@ -290,25 +309,20 @@ vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
 
   if (glassColor.a > 0.0) {
     float glassLuminance = dot(glassColor.rgb, vec3(0.299, 0.587, 0.114));
-
     if (glassLuminance < 0.5) {
-      // dunkle Tönung -> Multiplizieren
       vec3 darkened = liquidColor.rgb * (glassColor.rgb * 2.0);
       finalColor.rgb = mix(liquidColor.rgb, darkened, glassColor.a);
     } else {
-      // helle Tönung -> Screen
       vec3 invLiquid = vec3(1.0) - liquidColor.rgb;
       vec3 invGlass  = vec3(1.0) - glassColor.rgb;
       vec3 screened  = vec3(1.0) - (invLiquid * invGlass);
       finalColor.rgb = mix(liquidColor.rgb, screened, glassColor.a);
     }
-
     finalColor.a = liquidColor.a;
   }
 
   return finalColor;
 }
-
 
 // ────────────────────────────────────────────────────────────────────────────
 // PUBLIC API – ohne gaussian/kawase Parameter, mit vec2 lightDirection
@@ -343,7 +357,6 @@ vec4 renderLiquidGlass(
     backgroundColor.rgb
   );
 
-  // seine Tints/Adjustments
   vec4 finalColor = applyGlassColor(refractColor, glassColor);
   finalColor.rgb += lighting;
   finalColor.rgb  = applySaturationLightness(finalColor.rgb, saturation, lightness);

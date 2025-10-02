@@ -6,7 +6,6 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter_shaders/flutter_shaders.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_settings.dart';
@@ -26,9 +25,9 @@ class _PackedS {
   final double w; // Gewicht (normalisiert)
 }
 
-/// Widget: glasiger Effekt für ein beliebiges Child (Arbitrary Matte)
+/// Glas-Effekt für beliebiges Child (Arbitrary Matte) – mit aggressivem Caching.
 @experimental
-class Glassify extends StatefulWidget {
+class Glassify extends StatelessWidget {
   const Glassify({
     required this.child,
     this.settings = const LiquidGlassSettings(),
@@ -39,37 +38,29 @@ class Glassify extends StatefulWidget {
   final LiquidGlassSettings settings;
 
   @override
-  State<Glassify> createState() => _GlassifyState();
-}
-
-class _GlassifyState extends State<Glassify>
-    with SingleTickerProviderStateMixin {
-  @override
   Widget build(BuildContext context) {
     if (!ImageFilter.isShaderFilterSupported) {
       assert(
         ImageFilter.isShaderFilterSupported,
         'liquid_glass_renderer benötigt Impeller.',
       );
-      return widget.child;
+      return child;
     }
 
-    // Wir brauchen BEIDE Shader: V-Pass (arbitrary) UND H-Pass (gaussian_1d)
+    // Beide Shader: V + H
     return ShaderBuilder(
       assetKey: arbitraryShader, // liquid_glass_arbitrary.frag
-      (context, glassShader, child) => ShaderBuilder(
-        assetKey: gaussian1dBlurShader, // gaussian_1d_blur.frag (H-Pass)
-        (context, blurH, child) => _RawGlassify(
+      (context, glassShader, _) => ShaderBuilder(
+        assetKey: gaussian1dBlurShader, // gaussian_1d_blur.frag
+        (context, blurH, __) => _RawGlassify(
           shaderV: glassShader,
           shaderH: blurH,
-          settings: widget.settings,
-          debugRenderRefractionMap: false,
-          vsync: this,
-          child: child!,
+          settings: settings,
+          child: child,
         ),
         child: child,
       ),
-      child: widget.child,
+      child: child,
     );
   }
 }
@@ -79,16 +70,12 @@ class _RawGlassify extends SingleChildRenderObjectWidget {
     required this.shaderV,
     required this.shaderH,
     required this.settings,
-    required this.debugRenderRefractionMap,
-    required this.vsync,
     required Widget super.child,
   });
 
   final FragmentShader shaderV; // liquid_glass_arbitrary.frag
   final FragmentShader shaderH; // gaussian_1d_blur.frag
   final LiquidGlassSettings settings;
-  final bool debugRenderRefractionMap;
-  final TickerProvider vsync;
 
   @override
   RenderObject createRenderObject(BuildContext context) {
@@ -97,8 +84,6 @@ class _RawGlassify extends SingleChildRenderObjectWidget {
       shaderV: shaderV,
       shaderH: shaderH,
       settings: settings,
-      debugRenderRefractionMap: debugRenderRefractionMap,
-      ticker: vsync,
     );
   }
 
@@ -110,8 +95,6 @@ class _RawGlassify extends SingleChildRenderObjectWidget {
     renderObject
       ..devicePixelRatio = MediaQuery.devicePixelRatioOf(context)
       ..settings = settings
-      ..ticker = vsync
-      ..debugRenderRefractionMap = debugRenderRefractionMap
       ..setShaders(shaderV, shaderH);
   }
 }
@@ -123,16 +106,10 @@ class RenderGlassify extends RenderProxyBox {
     required FragmentShader shaderV,
     required FragmentShader shaderH,
     required LiquidGlassSettings settings,
-    required TickerProvider ticker,
-    bool debugRenderRefractionMap = false,
   })  : _devicePixelRatio = devicePixelRatio,
         _shaderV = shaderV,
         _shaderH = shaderH,
-        _settings = settings,
-        _tickerProvider = ticker,
-        _debugRenderRefractionMap = debugRenderRefractionMap {
-    _ticker = _tickerProvider.createTicker((_) => markNeedsPaint());
-  }
+        _settings = settings;
 
   double _devicePixelRatio;
   set devicePixelRatio(double value) {
@@ -162,29 +139,13 @@ class RenderGlassify extends RenderProxyBox {
     markNeedsPaint();
   }
 
-  bool _debugRenderRefractionMap;
-  set debugRenderRefractionMap(bool value) {
-    if (_debugRenderRefractionMap == value) return;
-    _debugRenderRefractionMap = value;
-    markNeedsPaint();
-  }
-
-  TickerProvider _tickerProvider;
-  set ticker(TickerProvider value) {
-    if (identical(_tickerProvider, value)) return;
-    _tickerProvider = value;
-    markNeedsPaint();
-  }
-
-  Ticker? _ticker;
-
   @override
   // ignore: library_private_types_in_public_api
   _GlassifyShaderLayer? get layer => super.layer as _GlassifyShaderLayer?;
 
   @override
   void paint(PaintingContext context, Offset offset) {
-    // Globaler Offset ermitteln (Backdrop läuft in globalen Koords)
+    // Globaler Offset (Backdrop arbeitet in Screen-Koords)
     var globalOffset = offset;
     try {
       final transform = getTransformTo(null);
@@ -202,6 +163,7 @@ class RenderGlassify extends RenderProxyBox {
       devicePixelRatio: _devicePixelRatio,
       layerSize: size,
     );
+
     layer!
       ..offset = offset
       ..globalOffset = globalOffset
@@ -217,17 +179,9 @@ class RenderGlassify extends RenderProxyBox {
       offset,
     );
   }
-
-  @override
-  void dispose() {
-    _ticker?.stop();
-    _ticker?.dispose();
-    _ticker = null;
-    super.dispose();
-  }
 }
 
-/// Custom-Layer, der den 2-Pass Backdrop (H dann V) kapselt
+/// Layer kapselt 2-Pass (H dann V) und cached aggressive Offscreen-Assets.
 class _GlassifyShaderLayer extends OffsetLayer {
   _GlassifyShaderLayer({
     required FragmentShader shaderV,
@@ -244,7 +198,8 @@ class _GlassifyShaderLayer extends OffsetLayer {
         _layerSize = layerSize,
         _globalOffset = globalOffset;
 
-  FragmentShader _shaderV; // V-Pass (arbitrary)
+  // ── State
+  FragmentShader _shaderV;
   FragmentShader get shaderV => _shaderV;
   set shaderV(FragmentShader value) {
     if (_shaderV == value) return;
@@ -252,7 +207,7 @@ class _GlassifyShaderLayer extends OffsetLayer {
     markNeedsAddToScene();
   }
 
-  FragmentShader _shaderH; // H-Pass
+  FragmentShader _shaderH;
   FragmentShader get shaderH => _shaderH;
   set shaderH(FragmentShader value) {
     if (_shaderH == value) return;
@@ -265,6 +220,7 @@ class _GlassifyShaderLayer extends OffsetLayer {
   set settings(LiquidGlassSettings value) {
     if (_settings == value) return;
     _settings = value;
+    _dirtyForSettings(); // invalidate caches if needed
     markNeedsAddToScene();
   }
 
@@ -273,6 +229,7 @@ class _GlassifyShaderLayer extends OffsetLayer {
   set devicePixelRatio(double value) {
     if (_devicePixelRatio == value) return;
     _devicePixelRatio = value;
+    _dirtyAll(); // DPR change invalidates all images
     markNeedsAddToScene();
   }
 
@@ -281,6 +238,7 @@ class _GlassifyShaderLayer extends OffsetLayer {
   set layerSize(Size value) {
     if (_layerSize == value) return;
     _layerSize = value;
+    _dirtyAll(); // size change → recapture all
     markNeedsAddToScene();
   }
 
@@ -289,25 +247,76 @@ class _GlassifyShaderLayer extends OffsetLayer {
   set globalOffset(Offset value) {
     if (_globalOffset == value) return;
     _globalOffset = value;
+    // globalOffset beeinflusst Sampling → V-Pass uniforms,
+    // aber Masken müssen nicht neu gerendert werden:
     markNeedsAddToScene();
   }
 
-  ui.Image? childImage;
-  ui.Image? childBlurredImage;
+  // ── Cached resources
+  ui.Image? _childImage; // scharfe Matte
+  ui.Image? _childBlurredImage; // geblurrte Matte (für Normal-Reko)
+  ui.Image? _hMaskDilated; // dilatierte Matte für H-Pass ShaderMask
+
+  double? _blurredMatteSigmaCache; // für _childBlurredImage
+  double? _hMaskInflateLogicalCache; // für _hMaskDilated
 
   ui.BackdropFilterEngineLayer? _hEngineLayer;
   ui.BackdropFilterEngineLayer? _vEngineLayer;
-  ui.ImageFilterEngineLayer? _imageFilterLayer;
+  ui.ImageFilterEngineLayer? _maskFilterLayer;
+
+  // Coverage picture cache
+  ui.Picture? _coveragePic;
+  Size? _coveragePicSize;
+
+  // Kernel cache (bucketed)
+  List<_PackedS>? _cachedKernel;
+  int _cachedSigmaBucket = -1;
+  static const int _sigmaBucketScale = 10; // 0.1 px Buckets
 
   // ── Impeller/Skia Kernel-Params
   static const int _kMaxKernel = 50;
   static const double _kMaxSigma = 500.0;
   static const double _kSqrt3 = 1.7320508075688772;
 
-  double _scaleSigma(double sigma) {
-    final s = sigma.clamp(0.0, _kMaxSigma);
+  // ── Dirty helpers
+  void _dirtyAll() {
+    _disposeImage(ref: _childImage, setNull: () => _childImage = null);
+    _disposeImage(
+        ref: _childBlurredImage, setNull: () => _childBlurredImage = null);
+    _disposeImage(ref: _hMaskDilated, setNull: () => _hMaskDilated = null);
+    _blurredMatteSigmaCache = null;
+    _hMaskInflateLogicalCache = null;
+    _coveragePic?.dispose();
+    _coveragePic = null;
+    _coveragePicSize = null;
+  }
+
+  void _dirtyForSettings() {
+    // Nur relevante Felder invalidieren:
+    // thickness beeinflusst blurredMatte (Normal-Reko)
+    final newMatteSigma = _matteSigma();
+    if (_blurredMatteSigmaCache != newMatteSigma) {
+      _disposeImage(
+          ref: _childBlurredImage, setNull: () => _childBlurredImage = null);
+      _blurredMatteSigmaCache = null;
+    }
+    // blur beeinflusst H-Pass-Maske (Inflation)
+    _hMaskInflateLogicalCache = null; // force re-eval, evtl. neu bauen
+    // Kernel wird separat gebucketet
+  }
+
+  void _disposeImage({required ui.Image? ref, required VoidCallback setNull}) {
+    try {
+      ref?.dispose();
+    } catch (_) {}
+    setNull();
+  }
+
+  // ── Kernel math
+  double _scaleSigma(double s) {
+    final clamped = s.clamp(0.0, _kMaxSigma);
     const a = 3.4e-06, b = -3.4e-3, c = 1.0;
-    return s * (c + b * s + a * s * s);
+    return clamped * (c + b * clamped + a * clamped * clamped);
   }
 
   double _sigmaToRadius(double sigma) {
@@ -316,25 +325,21 @@ class _GlassifyShaderLayer extends OffsetLayer {
 
   List<_RawS> _genRaw(double blurSigma, int radius, {int step = 1}) {
     final out = <_RawS>[];
-    int sampleCount = ((2 * radius) ~/ step) + 1;
-    int xOffset = 0;
+    int count = ((2 * radius) ~/ step) + 1;
+    int xOff = 0;
     if (radius >= 16) {
-      sampleCount -= 2;
-      xOffset = 1;
+      count -= 2;
+      xOff = 1;
     }
-    double tally = 0.0;
-    for (int i = 0; i < sampleCount; i++) {
-      final int x = xOffset + (i * step) - radius;
-      final double coeff = (math.exp(-0.5 * (x * x) / (blurSigma * blurSigma)) /
+    double sum = 0;
+    for (int i = 0; i < count; i++) {
+      final x = xOff + (i * step) - radius;
+      final c = (math.exp(-0.5 * (x * x) / (blurSigma * blurSigma)) /
           (math.sqrt(2 * math.pi) * blurSigma));
-      out.add(_RawS(x.toDouble(), coeff));
-      tally += coeff;
+      out.add(_RawS(x.toDouble(), c));
+      sum += c;
     }
-    if (tally > 0) {
-      for (final s in out) {
-        s.w /= tally;
-      }
-    }
+    if (sum > 0) for (final s in out) s.w /= sum;
     return out;
   }
 
@@ -346,9 +351,8 @@ class _GlassifyShaderLayer extends OffsetLayer {
     int j = 0;
     for (int i = 0; i < outCount; i++) {
       if (i == middle) {
-        final s = raw[j];
+        final s = raw[j++];
         out.add(_PackedS(s.x, s.w));
-        j++;
       } else {
         final a = raw[j], b = raw[j + 1];
         final w = a.w + b.w;
@@ -368,6 +372,131 @@ class _GlassifyShaderLayer extends OffsetLayer {
     return _lerpHack(_genRaw(scaled, r));
   }
 
+  List<_PackedS> _getCachedKernel(double sigmaPx) {
+    final bucket = (sigmaPx * _sigmaBucketScale).round();
+    if (_cachedKernel != null && bucket == _cachedSigmaBucket) {
+      return _cachedKernel!;
+    }
+    final k = _computeKernel(sigmaPx);
+    _cachedKernel = k;
+    _cachedSigmaBucket = bucket;
+    return k;
+  }
+
+  // ── Coverage picture (1px alpha) – cached per size
+  ui.Picture _coveragePicture(Size size) {
+    if (_coveragePic != null && _coveragePicSize == size) return _coveragePic!;
+    _coveragePic?.dispose();
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final paint = Paint()..color = const Color(0x01000000);
+    canvas.drawRect(Offset.zero & size, paint);
+    _coveragePic = recorder.endRecording();
+    _coveragePicSize = size;
+    return _coveragePic!;
+  }
+
+  // ── Helpers
+  double _matteSigma() => settings.thickness / 6.0;
+
+  void _ensureChildImages() {
+    final bounds = offset & layerSize;
+    final imgW = (devicePixelRatio * bounds.width).round().clamp(1, 16384);
+    final imgH = (devicePixelRatio * bounds.height).round().clamp(1, 16384);
+
+    // Scharfe Matte
+    if (_childImage == null ||
+        _childImage!.width != imgW ||
+        _childImage!.height != imgH) {
+      _disposeImage(ref: _childImage, setNull: () => _childImage = null);
+      _childImage = _buildMaskImage();
+    }
+
+    // Geblurrte Matte (für Normal-Reko)
+    final blurSigma = _matteSigma();
+    if (_childBlurredImage == null ||
+        _blurredMatteSigmaCache != blurSigma ||
+        _childBlurredImage!.width != imgW ||
+        _childBlurredImage!.height != imgH) {
+      _disposeImage(
+          ref: _childBlurredImage, setNull: () => _childBlurredImage = null);
+      _childBlurredImage = _buildMaskImage(blurSigma);
+      _blurredMatteSigmaCache = blurSigma;
+    }
+  }
+
+  void _ensureHMaskDilated(double inflateLogicalPx) {
+    final bounds = offset & layerSize;
+    final imgW = (devicePixelRatio * bounds.width).round().clamp(1, 16384);
+    final imgH = (devicePixelRatio * bounds.height).round().clamp(1, 16384);
+
+    if (_hMaskDilated == null ||
+        _hMaskInflateLogicalCache != inflateLogicalPx ||
+        _hMaskDilated!.width != imgW ||
+        _hMaskDilated!.height != imgH) {
+      _disposeImage(ref: _hMaskDilated, setNull: () => _hMaskDilated = null);
+      _hMaskDilated = _buildMaskImageDilated(inflateLogicalPx);
+      _hMaskInflateLogicalCache = inflateLogicalPx;
+    }
+  }
+
+  // ── Scene capture utilities
+  ui.Image _buildMaskImage([double? blurSigma]) {
+    final builder = ui.SceneBuilder();
+    builder.pushTransform(
+      Matrix4.diagonal3Values(devicePixelRatio, devicePixelRatio, 1).storage,
+    );
+    _addMaskToScene(builder, blurSigma);
+    builder.pop();
+
+    final bounds = offset & layerSize;
+    return builder.build().toImageSync(
+          (devicePixelRatio * bounds.width).round().clamp(1, 16384),
+          (devicePixelRatio * bounds.height).round().clamp(1, 16384),
+        );
+  }
+
+  ui.Image _buildMaskImageDilated(double inflateLogicalPx) {
+    final builder = ui.SceneBuilder();
+    builder.pushTransform(
+      Matrix4.diagonal3Values(devicePixelRatio, devicePixelRatio, 1).storage,
+    );
+
+    builder.pushOffset(-offset.dx, -offset.dy);
+    final double r = (inflateLogicalPx * devicePixelRatio).clamp(0.0, 4096.0);
+    builder.pushImageFilter(ImageFilter.dilate(radiusX: r, radiusY: r));
+
+    addChildrenToScene(builder);
+
+    builder.pop(); // image filter
+    builder.pop(); // offset
+    builder.pop(); // transform
+
+    final bounds = offset & layerSize;
+    return builder.build().toImageSync(
+          (devicePixelRatio * bounds.width).round().clamp(1, 16384),
+          (devicePixelRatio * bounds.height).round().clamp(1, 16384),
+        );
+  }
+
+  void _addMaskToScene(ui.SceneBuilder builder, [double? blurSigma]) {
+    builder.pushOffset(-offset.dx, -offset.dy);
+    if (blurSigma != null && blurSigma > 0) {
+      _maskFilterLayer = builder.pushImageFilter(
+        ImageFilter.compose(
+          outer: ImageFilter.blur(sigmaX: blurSigma, sigmaY: blurSigma),
+          inner: ImageFilter.erode(radiusX: blurSigma, radiusY: blurSigma),
+        ),
+        oldLayer: _maskFilterLayer,
+      );
+    }
+    addChildrenToScene(builder);
+    if (blurSigma != null && blurSigma > 0) {
+      builder.pop();
+    }
+    builder.pop();
+  }
+
   @override
   void addToScene(ui.SceneBuilder builder) {
     // Offset-Layer
@@ -378,26 +507,25 @@ class _GlassifyShaderLayer extends OffsetLayer {
     );
     engineLayer = offsetLayer;
     {
-      _captureChildLayer();
-      _captureChildBlurredLayer();
+      // 1) Caches aktualisieren (nur wenn nötig)
+      _ensureChildImages();
 
-      // Größen in DEVICE-Pixeln
-      final screenLogical = RendererBinding.instance.renderView.size;
-      final screenDevice = Size(
+      // 2) Blur-Setup
+      final Size screenLogical = RendererBinding.instance.renderView.size;
+      final Size screenDevice = Size(
         screenLogical.width * devicePixelRatio,
         screenLogical.height * devicePixelRatio,
       );
-
-      // σ in DEVICE-Pixeln
       final double sigmaPx = settings.blur * devicePixelRatio;
 
-      // Kernel (V-Pass immer; bei sigma==0 → 1 Sample @ 0 mit w=1)
-      final kernel = _computeKernel(sigmaPx);
+      final kernel = _getCachedKernel(sigmaPx);
       final int n = kernel.length.clamp(1, _kMaxKernel);
 
-      bool hIsOpen = false;
+      // Clip-Rechtecke (logische px)
+      final Rect vClip = Offset.zero & layerSize;
+      final double inflateLogical = (sigmaPx * 3.0 + 2.0) / devicePixelRatio;
 
-      // ───────── PASS 1: H (gaussian_1d_blur.frag) — NUR wenn sigma>0 ─────────
+      // ───────── PASS 1: H (nur wenn sigma>0) ─────────
       if (sigmaPx > 0.0) {
         _shaderH
           ..setFloat(0, screenDevice.width) // u_size.x
@@ -405,7 +533,7 @@ class _GlassifyShaderLayer extends OffsetLayer {
           ..setFloat(2, 1.0) // u_dir.x (H)
           ..setFloat(3, 0.0) // u_dir.y
           ..setFloat(4, n.toDouble()) // u_sample_count
-          ..setFloat(5, 0.0); // u_tile_mode (clamp)
+          ..setFloat(5, 0.0); // u_tile_mode = clamp
 
         int baseH = 6;
         for (int i = 0; i < n; i++) {
@@ -417,191 +545,108 @@ class _GlassifyShaderLayer extends OffsetLayer {
             ..setFloat(baseH + i * 4 + 3, 0.0);
         }
 
+        _ensureHMaskDilated(inflateLogical);
+
+        final ui.Shader maskShader = ImageShader(
+          _hMaskDilated!,
+          TileMode.clamp,
+          TileMode.clamp,
+          Matrix4.identity().storage,
+          filterQuality: FilterQuality.low,
+        );
+
+        // Maskiere den H-Pass: Blur findet NUR innerhalb dilatierter Matte statt.
+        builder.pushShaderMask(maskShader, vClip, BlendMode.dstIn);
+
         _hEngineLayer = builder.pushBackdropFilter(
           ImageFilter.shader(_shaderH),
           oldLayer: _hEngineLayer,
         );
-        hIsOpen = true;
+
+        builder.addPicture(Offset.zero, _coveragePicture(layerSize));
+
+        builder.pop(); // H BackdropFilter
+        builder.pop(); // ShaderMask
       } else {
         _hEngineLayer = null;
       }
 
-      // ───────── PASS 2: V (arbitrary + Refraction + Lighting) — IMMER ─────────
+      // ───────── PASS 2: V (Glass + Refraction) ─────────
       _setupVUniforms(screenDevice, kernel);
 
+      builder.pushClipRect(vClip);
       _vEngineLayer = builder.pushBackdropFilter(
         ImageFilter.shader(_shaderV),
         oldLayer: _vEngineLayer,
       );
 
-      // Coverage EINMAL innen
-      _addCoverageQuad(builder);
+      builder.addPicture(Offset.zero, _coveragePicture(layerSize));
 
-      // Pop V
-      builder.pop();
-
-      // Pop H (falls offen)
-      if (hIsOpen) {
-        builder.pop();
-      }
+      builder.pop(); // V Backdrop
+      builder.pop(); // Clip
     }
-    // Pop Offset
-    builder.pop();
+    builder.pop(); // Offset
   }
 
   void _setupVUniforms(Size screenDevice, List<_PackedS> kernel) {
     final fgW = layerSize.width * devicePixelRatio;
     final fgH = layerSize.height * devicePixelRatio;
 
-    // Sampler binden: 0 = Backdrop (automatisch vom BackdropFilter),
-    // 1 = uForegroundTexture, 2 = uForegroundBlurredTexture
     _shaderV
-      ..setImageSampler(1, childImage!)
-      ..setImageSampler(2, childBlurredImage!);
+      ..setImageSampler(1, _childImage!) // uForegroundTexture
+      ..setImageSampler(2, _childBlurredImage!); // uForegroundBlurredTexture
 
-    // ── HEADER (identisch zu liquid_glass.frag) ───────────────────────────────
-    // layout(location = 0) vec2 uSize;           // wird von Flutter gesetzt → NICHT setzen
-    // layout(location = 1) vec4 uGlassColor;     // slots  2..5
     _shaderV
       ..setFloat(2, settings.glassColor.r)
       ..setFloat(3, settings.glassColor.g)
       ..setFloat(4, settings.glassColor.b)
-      ..setFloat(5, settings.glassColor.a);
-
-    // layout(location = 2) vec4 uOpticalProps;   // slots  6..9
-    _shaderV
+      ..setFloat(5, settings.glassColor.a)
       ..setFloat(6, settings.refractiveIndex)
       ..setFloat(7, settings.chromaticAberration)
       ..setFloat(8, settings.thickness)
-      ..setFloat(9, 0.0); // blend ist bei Arbitrary egal
-
-    // layout(location = 3) vec4 uLightConfig;    // slots 10..13
-    _shaderV
-      ..setFloat(10, settings.lightAngle) // legacy; Richtung kommt unten
+      ..setFloat(9, 0.0)
+      ..setFloat(10, settings.lightAngle)
       ..setFloat(11, settings.lightIntensity)
       ..setFloat(12, settings.ambientStrength)
-      ..setFloat(13, settings.saturation);
-
-    // layout(location = 4) vec2 uColorAdjust;    // slots 14..15
-    _shaderV
+      ..setFloat(13, settings.saturation)
       ..setFloat(14, settings.lightness)
-      ..setFloat(15, 0.0); // numShapes ungenutzt
-
-    // layout(location = 5) vec2 uLightDirection; // slots 16..17
-    final lx = math.cos(settings.lightAngle);
-    final ly = math.sin(settings.lightAngle);
-    _shaderV
-      ..setFloat(16, lx)
-      ..setFloat(17, ly);
-
-    // ── MATTE-UNIFORMS direkt hinter dem Header ───────────────────────────────
-    // layout(location = 6) vec2 uForegroundSize; // slots 18..19
-    _shaderV
+      ..setFloat(15, 0.0)
+      ..setFloat(16, math.cos(settings.lightAngle))
+      ..setFloat(17, math.sin(settings.lightAngle))
       ..setFloat(18, fgW)
-      ..setFloat(19, fgH);
-
-    // layout(location = 7) vec2 uOffset;         // slots 20..21
-    _shaderV
+      ..setFloat(19, fgH)
       ..setFloat(20, globalOffset.dx * devicePixelRatio)
       ..setFloat(21, globalOffset.dy * devicePixelRatio);
 
-    // ── IMPeller-Blur-Uniforms (NACH HINTEN, wie im Shader) ───────────────────
     final n = kernel.length.clamp(1, _kMaxKernel);
-
-    // layout(location = 102..105): skalare
     _shaderV
-      ..setFloat(102, 0.0) // u_dir_x  (V)
-      ..setFloat(103, 1.0) // u_dir_y
-      ..setFloat(104, n.toDouble()) // u_sample_count
-      ..setFloat(105, 0.0); // u_tile_mode = clamp
+      ..setFloat(102, 0.0) // V
+      ..setFloat(103, 1.0)
+      ..setFloat(104, n.toDouble())
+      ..setFloat(105, 0.0);
 
-    // layout(location = 106) u_samples[50] (vec4 je Sample)
     int base = 106;
     for (int i = 0; i < n; i++) {
       final s = kernel[i];
       _shaderV
-        ..setFloat(base + i * 4 + 0, s.tPx) // x = Offset (Pixel)
+        ..setFloat(base + i * 4 + 0, s.tPx)
         ..setFloat(base + i * 4 + 1, 0.0)
-        ..setFloat(base + i * 4 + 2, s.w) // z = Gewicht
+        ..setFloat(base + i * 4 + 2, s.w)
         ..setFloat(base + i * 4 + 3, 0.0);
     }
   }
 
-  // ── Matte fangen (scharf + geblurrt für Normal-Reko)
-  void _captureChildLayer() {
-    childImage?.dispose();
-    childImage = _buildMaskImage();
-  }
-
-  void _captureChildBlurredLayer() {
-    childBlurredImage?.dispose();
-    final matteBlur = settings.thickness / 6.0;
-    childBlurredImage = _buildMaskImage(matteBlur);
-  }
-
-  ui.Image _buildMaskImage([double? blur]) {
-    final builder = ui.SceneBuilder();
-    final transform =
-        Matrix4.diagonal3Values(devicePixelRatio, devicePixelRatio, 1);
-    final bounds = offset & layerSize;
-
-    builder.pushTransform(transform.storage);
-    _addMaskToScene(builder, blur);
-    builder.pop();
-
-    return builder.build().toImageSync(
-          (devicePixelRatio * bounds.width).floor(),
-          (devicePixelRatio * bounds.height).floor(),
-        );
-  }
-
-  ui.ImageFilterEngineLayer? _maskFilterLayer;
-
-  void _addMaskToScene(ui.SceneBuilder builder, [double? blur]) {
-    final mask = firstChild;
-
-    builder.pushOffset(-offset.dx, -offset.dy);
-
-    if (blur != null) {
-      _maskFilterLayer = builder.pushImageFilter(
-        ImageFilter.compose(
-          outer: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-          inner: ImageFilter.erode(radiusX: blur, radiusY: blur),
-        ),
-        oldLayer: _maskFilterLayer,
-      );
-    }
-
-    mask?.addToScene(builder);
-
-    if (blur != null) {
-      builder.pop();
-    }
-
-    builder.pop();
-  }
-
-  ui.Picture _buildCoveragePicture(Size size) {
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final paint = Paint()..color = const Color(0x01000000); // 1/255 alpha
-    canvas.drawRect(Offset.zero & size, paint);
-    return recorder.endRecording();
-  }
-
-  void _addCoverageQuad(ui.SceneBuilder builder) {
-    final pic = _buildCoveragePicture(layerSize);
-    builder.addPicture(Offset.zero, pic);
-    pic.dispose();
-  }
-
   @override
   void dispose() {
-    childImage?.dispose();
-    childBlurredImage?.dispose();
+    _disposeImage(ref: _childImage, setNull: () => _childImage = null);
+    _disposeImage(
+        ref: _childBlurredImage, setNull: () => _childBlurredImage = null);
+    _disposeImage(ref: _hMaskDilated, setNull: () => _hMaskDilated = null);
     _maskFilterLayer?.dispose();
     _hEngineLayer?.dispose();
     _vEngineLayer?.dispose();
+    _coveragePic?.dispose();
+    _coveragePic = null;
     super.dispose();
   }
 }
