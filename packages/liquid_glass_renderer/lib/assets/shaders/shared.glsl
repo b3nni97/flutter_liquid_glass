@@ -24,7 +24,7 @@
 #define LG_LOD_BIAS_SCALE 0.75
 #endif
 
-// CA vollständig Gaussian (pass-kompatibel, keine Kawase-Zweige)
+// CA Pass-Steuerung für separablen Blur
 #ifndef LG_CA_PASS_MODE
 // 0=beide Pässe, 1=nur vertikal (|u_dir_y|>=|u_dir_x|), 2=nur horizontal
 #define LG_CA_PASS_MODE 1
@@ -84,15 +84,18 @@ vec2  mirror01(vec2 uv){ return vec2(mirror1(uv.x), mirror1(uv.y)); }
 // ---------- Impeller-Identisches Tiling (für Gaussian 1D) ----------
 vec2 tile_uv_mode(vec2 uv, vec2 size, float mode){
   if (mode < 0.5) {
+    // Clamp (mit halbem Texel als Rand wie Impeller)
     vec2 eps = 0.5 / size;
     return clamp(uv, eps, vec2(1.0) - eps);
   } else if (mode < 1.5) {
-    return fract(uv);
+    return fract(uv); // repeat
   } else if (mode < 2.5) {
+    // mirror
     vec2 m = mod(uv, 2.0);
     return mix(m, 2.0 - m, step(1.0, m));
   } else {
-    return uv; // decal: uv bleibt roh, OOB wird separat 0
+    // decal: UV roh; OOB separat = 0
+    return uv;
   }
 }
 vec4 sample_uv_mode(sampler2D tex, vec2 uv, vec2 size, float mode){
@@ -105,7 +108,14 @@ vec4 sample_uv_mode(sampler2D tex, vec2 uv, vec2 size, float mode){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-/*  EXAKTER Gaussian 1D nach Impeller (liest Impeller-Uniforms)  */
+/*  EXAKTER Gaussian 1D nach Impeller (liest Impeller-Uniforms)
+    Erwartete Uniforms (vom Host/Shader bereitgestellt):
+      - vec2  uSize (Framebuffer)
+      - float u_dir_x, u_dir_y
+      - float u_sample_count
+      - float u_tile_mode
+      - vec4  u_samples[50]  // x=offset(px), z=weight
+*/
 // ────────────────────────────────────────────────────────────────────────────
 vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
   vec2 pixel    = vec2(1.0 / uSize.x, 1.0 / uSize.y);
@@ -152,7 +162,7 @@ bool _shouldApplyCA(){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Lighting / Color
+// Lighting / Color (integriert mit Author-Verbesserungen)
 // ────────────────────────────────────────────────────────────────────────────
 vec3 getHighlightColor(vec3 backgroundColor, float targetBrightness) {
   float luminance = dot(backgroundColor, vec3(0.299, 0.587, 0.114));
@@ -196,7 +206,7 @@ float calculateDispersiveIndex(float baseIndex, float chromaticAberration, float
   return baseIndex - B / wavelengthSq - C / wavelengthQuad;
 }
 
-// Lighting (leicht beschleunigt durch lg_norm2)
+// Lighting (schnell, ohne exp(); kompatibel mit deinem Normal-Setup)
 vec3 calculateLighting(
   vec2 uv, vec3 normal, float sd, float thickness, float height,
   vec2 lightDirection, float lightIntensity, float ambientStrength,
@@ -325,7 +335,7 @@ vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// PUBLIC API – ohne gaussian/kawase Parameter, mit vec2 lightDirection
+// PUBLIC API – ohne Kawase-Parameter, voll kompatibel zu deiner Blur-Pipeline
 // ────────────────────────────────────────────────────────────────────────────
 vec4 renderLiquidGlass(
   vec2 screenUV, vec2 p, vec2 uSizePx,
@@ -335,11 +345,13 @@ vec4 renderLiquidGlass(
   sampler2D backgroundTexture, vec3 normal, float foregroundAlpha,
   float saturation, float lightness
 ){
+  vec4 backgroundColor = texScreen(backgroundTexture, screenUV);
+
   if (foregroundAlpha < 0.001) {
-    return texScreen(backgroundTexture, screenUV);
+    return backgroundColor;
   }
   if (thickness < 0.01) {
-    return texScreen(backgroundTexture, screenUV);
+    return backgroundColor;
   }
 
   float height = getHeight(sd, thickness);
@@ -350,7 +362,6 @@ vec4 renderLiquidGlass(
     uSizePx, backgroundTexture, refractionDisplacement
   );
 
-  vec4 backgroundColor = texScreen(backgroundTexture, screenUV);
   vec3 lighting = calculateLighting(
     screenUV, normal, sd, thickness, height,
     lightDirection, lightIntensity, ambientStrength,
@@ -362,6 +373,15 @@ vec4 renderLiquidGlass(
   finalColor.rgb  = applySaturationLightness(finalColor.rgb, saturation, lightness);
 
   return mix(backgroundColor, finalColor, foregroundAlpha);
+}
+
+// Optional: Debug-Normals-Overlay (wie beim Autor)
+vec4 debugNormals(vec4 originalColor, vec3 normal, bool enableDebug) {
+  if (enableDebug) {
+    vec3 normalColor = (normal + 1.0) * 0.5;
+    return mix(originalColor, vec4(normalColor, 1.0), 0.99);
+  }
+  return originalColor;
 }
 
 #endif // LIQUID_GLASS_SHARED_GLSL

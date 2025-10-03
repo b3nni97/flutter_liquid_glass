@@ -1,9 +1,17 @@
 // liquid_glass_arbitrary.frag — Arbitrary-Variante (kompatibles Layout zu liquid_glass.frag)
 //
-// - Gepackter Header identisch zu liquid_glass.frag (0..5)
-// - Zusätzliche Matte-Uniforms direkt dahinter (6..7)
-// - Impeller 1D Blur Uniforms hinterlegt wie in liquid_glass.frag (102..106)
-// - CA & Blur via shared.glsl (applyGaussian1D_Impeller / calculateRefraction / renderLiquidGlass)
+// Layout-Übersicht (kompatibel zu liquid_glass.frag):
+//   0 : vec2 uSize
+//   1 : vec4 uGlassColor
+//   2 : vec4 uOpticalProps   (RI, CA, thickness, blend)
+//   3 : vec4 uLightConfig    (angle, intensity, ambient, saturation)
+//   4 : vec2 uColorAdjust    (lightness, numShapes[unused])
+//   5 : vec2 uLightDirection (cos, sin)
+//   6..9 : mat4 uTransform
+//   10 : vec2 uForegroundSize     // NEU (Matte) – layer size in device px
+//   11 : vec2 uOffset             // NEU (Matte) – layer top-left (device px)
+//   106 : vec4 uBlurHeader        // (dir.x, dir.y, sample_count, tile_mode)
+//   107.. : vec4 u_samples[50]    // vec4(tPx, 0, w, 0)
 
 #version 320 es
 precision highp float;
@@ -11,16 +19,17 @@ precision highp float;
 #include <flutter/runtime_effect.glsl>
 
 // ────────────────────────────────────────────────────────────────────────────
-// Gepackter Header (IDENTISCH zu liquid_glass.frag)
+// Gepackter Header (IDENTISCH zu liquid_glass.frag) + Transform
 // ────────────────────────────────────────────────────────────────────────────
 layout(location = 0) uniform vec2 uSize;           // auto von Flutter
 layout(location = 1) uniform vec4 uGlassColor;     // r,g,b,a
 layout(location = 2) uniform vec4 uOpticalProps;   // RI, CA, thickness, blend
 layout(location = 3) uniform vec4 uLightConfig;    // angle, intensity, ambient, saturation
-layout(location = 4) uniform vec2 uColorAdjust;    // lightness, numShapes (numShapes hier ungenutzt)
+layout(location = 4) uniform vec2 uColorAdjust;    // lightness, numShapes (hier ungenutzt)
 layout(location = 5) uniform vec2 uLightDirection; // cos(angle), sin(angle)
+layout(location = 6) uniform mat4 uTransform;      // Transform für FragCoord (kompatibel)
 
-// Backwards-compatible Aliases (wie in liquid_glass.frag)
+// Backwards-compatible Aliases
 float uRefractiveIndex     = uOpticalProps.x;
 float uChromaticAberration = uOpticalProps.y;
 float uThickness           = uOpticalProps.z;
@@ -35,30 +44,32 @@ float uLightness           = uColorAdjust.x;
 // float uNumShapes         = uColorAdjust.y; // hier nicht benötigt
 
 // ────────────────────────────────────────────────────────────────────────────
+// Matte/Layer-spezifische Uniforms (NEU) → Locations 10 und 11
+// ────────────────────────────────────────────────────────────────────────────
+layout(location = 10) uniform vec2 uForegroundSize; // Größe der Matte in Device-Px
+layout(location = 11) uniform vec2 uOffset;         // Top-left der Matte in Device-Px (Screen-Koords)
+
+// ────────────────────────────────────────────────────────────────────────────
 #define DEBUG_NORMALS     0
 #define DEBUG_BLUR_MATTE  0
 
 // ────────────────────────────────────────────────────────────────────────────
-// Matte/Layer-spezifische Uniforms (NEU, direkt hinter dem Header)
-// ────────────────────────────────────────────────────────────────────────────
-layout(location = 6) uniform vec2 uForegroundSize;  // Größe der Matte in Device-Px
-layout(location = 7) uniform vec2 uOffset;          // Top-left der Matte in Device-Px (Screen-Koords)
-
-// ────────────────────────────────────────────────────────────────────────────
 // Impeller-Blur-Uniforms (IDENTISCH zu liquid_glass.frag)
 // ────────────────────────────────────────────────────────────────────────────
-layout(location = 102) uniform float u_dir_x;
-layout(location = 103) uniform float u_dir_y;
-layout(location = 104) uniform float u_sample_count;
-layout(location = 105) uniform float u_tile_mode;
-layout(location = 106) uniform vec4  u_samples[50]; // vec4(tPx, 0, w, 0)
+layout(location = 106) uniform vec4 uBlurHeader;  // x=dir.x, y=dir.y, z=sample_count, w=tile_mode
+#define u_dir_x        (uBlurHeader.x)
+#define u_dir_y        (uBlurHeader.y)
+#define u_sample_count (uBlurHeader.z)
+#define u_tile_mode    (uBlurHeader.w)
+
+layout(location = 107) uniform vec4 u_samples[50]; // vec4(tPx, 0, w, 0)
 
 // ────────────────────────────────────────────────────────────────────────────
 // Texturen
 // ────────────────────────────────────────────────────────────────────────────
-uniform sampler2D uBackgroundTexture;        // scene behind glass
-uniform sampler2D uForegroundTexture;        // matte (RGBA) – ungeblurred
-uniform sampler2D uForegroundBlurredTexture; // matte (RGBA) – geblurrt (für SDF/Normal-Reko)
+uniform sampler2D uBackgroundTexture;        // Szene hinter Glas
+uniform sampler2D uForegroundTexture;        // Matte (RGBA) – ungeblurred
+uniform sampler2D uForegroundBlurredTexture; // Matte (RGBA) – geblurrt (für SDF/Normal-Reko)
 
 layout(location = 0) out vec4 fragColor;
 
@@ -68,7 +79,7 @@ layout(location = 0) out vec4 fragColor;
 #include "shared.glsl"
 
 // ────────────────────────────────────────────────────────────────────────────
-// Arbitrary-Hilfsfunktionen (deine Variante)
+// Arbitrary-Hilfsfunktionen
 // ────────────────────────────────────────────────────────────────────────────
 float approximateSDF(float blurredAlpha, float thickness) {
   // alpha: 0=edge → 1=center  =>  SDF: 0=edge → -thickness=center
@@ -133,11 +144,17 @@ vec3 getNormal(vec2 p, float thickness) {
 // MAIN
 // ────────────────────────────────────────────────────────────────────────────
 void main() {
-  vec2 p = FlutterFragCoord().xy;
-  vec2 screenUV = p / uSize;
+  vec2 pScreen = FlutterFragCoord().xy + vec2(0.5);
+  vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
+  vec2 screenUV = pScreen * invSize;
+
 #ifdef IMPELLER_TARGET_OPENGLES
   screenUV.y = 1.0 - screenUV.y;
 #endif
+
+  // Kompatibel zur Standard-Variante: Transform anwenden
+  vec4 transformedCoord = uTransform * vec4(pScreen, 0.0, 1.0);
+  vec2 p = transformedCoord.xy;
 
   // Layer-lokale Koords/UV
   vec2 layerLocal = p - uOffset;

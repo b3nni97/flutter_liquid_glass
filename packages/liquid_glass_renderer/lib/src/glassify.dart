@@ -292,7 +292,6 @@ class _GlassifyShaderLayer extends OffsetLayer {
   }
 
   void _dirtyForSettings() {
-    // Nur relevante Felder invalidieren:
     // thickness beeinflusst blurredMatte (Normal-Reko)
     final newMatteSigma = _matteSigma();
     if (_blurredMatteSigmaCache != newMatteSigma) {
@@ -301,8 +300,7 @@ class _GlassifyShaderLayer extends OffsetLayer {
       _blurredMatteSigmaCache = null;
     }
     // blur beeinflusst H-Pass-Maske (Inflation)
-    _hMaskInflateLogicalCache = null; // force re-eval, evtl. neu bauen
-    // Kernel wird separat gebucketet
+    _hMaskInflateLogicalCache = null; // force re-eval
   }
 
   void _disposeImage({required ui.Image? ref, required VoidCallback setNull}) {
@@ -572,7 +570,7 @@ class _GlassifyShaderLayer extends OffsetLayer {
       }
 
       // ───────── PASS 2: V (Glass + Refraction) ─────────
-      _setupVUniforms(screenDevice, kernel);
+      _setupVUniforms(screenDevice, kernel); // CHANGED: neue Indizes
 
       builder.pushClipRect(vClip);
       _vEngineLayer = builder.pushBackdropFilter(
@@ -592,10 +590,12 @@ class _GlassifyShaderLayer extends OffsetLayer {
     final fgW = layerSize.width * devicePixelRatio;
     final fgH = layerSize.height * devicePixelRatio;
 
+    // Sampler: 0 = uBackgroundTexture (vom Engine), 1/2 setzen wir selbst
     _shaderV
       ..setImageSampler(1, _childImage!) // uForegroundTexture
       ..setImageSampler(2, _childBlurredImage!); // uForegroundBlurredTexture
 
+    // ── Header (2..17) identisch zu liquid_glass.frag
     _shaderV
       ..setFloat(2, settings.glassColor.r)
       ..setFloat(3, settings.glassColor.g)
@@ -604,28 +604,56 @@ class _GlassifyShaderLayer extends OffsetLayer {
       ..setFloat(6, settings.refractiveIndex)
       ..setFloat(7, settings.chromaticAberration)
       ..setFloat(8, settings.thickness)
-      ..setFloat(9, 0.0)
+      ..setFloat(9, 0.0) // blend wird in Arbitrary nicht genutzt
       ..setFloat(10, settings.lightAngle)
       ..setFloat(11, settings.lightIntensity)
       ..setFloat(12, settings.ambientStrength)
       ..setFloat(13, settings.saturation)
       ..setFloat(14, settings.lightness)
-      ..setFloat(15, 0.0)
+      ..setFloat(15, 0.0) // numShapes ungenutzt
       ..setFloat(16, math.cos(settings.lightAngle))
-      ..setFloat(17, math.sin(settings.lightAngle))
-      ..setFloat(18, fgW)
-      ..setFloat(19, fgH)
-      ..setFloat(20, globalOffset.dx * devicePixelRatio)
-      ..setFloat(21, globalOffset.dy * devicePixelRatio);
+      ..setFloat(17, math.sin(settings.lightAngle));
 
+    // ── uTransform (18..33) – hier Identity (CHANGED)
+    const List<double> _identityMat4 = <double>[
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+    ];
+    for (int i = 0; i < 16; i++) {
+      _shaderV.setFloat(18 + i, _identityMat4[i]); // 18..33
+    }
+
+    // ── Matte-Uniforms (CHANGED: 34..37)
+    _shaderV
+      ..setFloat(34, fgW) // uForegroundSize.x
+      ..setFloat(35, fgH) // uForegroundSize.y
+      ..setFloat(
+          36, globalOffset.dx * devicePixelRatio) // uOffset.x (device px)
+      ..setFloat(37, globalOffset.dy * devicePixelRatio); // uOffset.y
+
+    // ── Impeller-Blur (CHANGED: Header 38..41, Samples ab 42)
     final n = kernel.length.clamp(1, _kMaxKernel);
     _shaderV
-      ..setFloat(102, 0.0) // V
-      ..setFloat(103, 1.0)
-      ..setFloat(104, n.toDouble())
-      ..setFloat(105, 0.0);
+      ..setFloat(38, 0.0) // dir.x (V)
+      ..setFloat(39, 1.0) // dir.y
+      ..setFloat(40, n.toDouble()) // sample_count
+      ..setFloat(41, 0.0); // tile_mode = clamp
 
-    int base = 106;
+    int base = 42; // u_samples[0]
     for (int i = 0; i < n; i++) {
       final s = kernel[i];
       _shaderV
