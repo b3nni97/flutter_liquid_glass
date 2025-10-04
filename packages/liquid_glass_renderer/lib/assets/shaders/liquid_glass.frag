@@ -1,4 +1,4 @@
-// liquid_glass.frag — Packed locations; Blur nach uShapeData verschoben (106/107)
+// liquid_glass.frag — Packed locations; blur uniforms moved after uShapeData (106/107)
 #version 320 es
 
 precision mediump float;
@@ -6,37 +6,49 @@ precision mediump int;
 
 #include <flutter/runtime_effect.glsl>
 
-// ───────────────────── Packed header (feste Locations) ─────────────────────
-layout(location = 0) uniform vec2 uSize;            // (width, height) – von Flutter
-layout(location = 1) uniform vec4 uGlassColor;      // r,g,b,a
-layout(location = 2) uniform vec4 uOpticalProps;    // RI, CA, thickness, blend
-layout(location = 3) uniform vec4 uLightConfig;     // angle, intensity, ambient, saturation
-layout(location = 4) uniform vec2 uColorAdjust;     // lightness, numShapes
-layout(location = 5) uniform vec2 uLightDirection;  // cos(angle), sin(angle)
-layout(location = 6) uniform mat4 uTransform;       // Transform für FragCoord
+// ───────────────────── Packed header (fixed locations) ─────────────────────
+// Set by Flutter: logical device size in device pixels (width, height).
+layout(location = 0) uniform vec2 uSize;
+// RGBA tint applied to the glass.
+layout(location = 1) uniform vec4 uGlassColor;
+// Optical properties: refractive index (RI), chromatic aberration (CA),
+// effective thickness (px), and blend factor for shape unions.
+layout(location = 2) uniform vec4 uOpticalProps;
+// Lighting configuration: light angle (rad), intensity, ambient strength,
+// and color saturation multiplier.
+layout(location = 3) uniform vec4 uLightConfig;
+// Color adjustments: lightness and number of shapes (as float).
+layout(location = 4) uniform vec2 uColorAdjust;
+// Precomputed light direction: cos(angle), sin(angle).
+layout(location = 5) uniform vec2 uLightDirection;
+// Transform applied to FragCoord before SDF evaluation.
+layout(location = 6) uniform mat4 uTransform;
+// Rim configuration: rim width and rim sharpness.
+layout(location = 10) uniform vec2 uRimParams;
 
-// ───────────────────── Shapes (16 max; feste Location) ─────────────────────
+// ───────────────────── Shapes (max 16; fixed location) ─────────────────────
 #define MAX_SHAPES 16
-layout(location = 10) uniform float uShapeData[MAX_SHAPES * 6];
-// (type, centerX, centerY, sizeW, sizeH, cornerRadius)
-// -> Belegt bei 16 Shapes 96 Floats: Locations 10..105
+layout(location = 11) uniform float uShapeData[MAX_SHAPES * 6];
+// Layout per shape: (type, centerX, centerY, sizeW, sizeH, cornerRadius)
+// Consumes 96 floats for 16 shapes → locations 10..105
 
-// ───────────────────── Blur-Uniforms (hinter uShapeData) ───────────────────
-// Nächste freie Location = 106
-layout(location = 106) uniform vec4 uBlurHeader;     // x=u_dir_x, y=u_dir_y, z=u_sample_count, w=u_tile_mode
+// ───────────────────── Blur uniforms (after uShapeData) ────────────────────
+// Next free location is 106
+layout(location = 107) uniform vec4 uBlurHeader;
+// x=u_dir_x, y=u_dir_y, z=u_sample_count, w=u_tile_mode
 #define u_dir_x        (uBlurHeader.x)
 #define u_dir_y        (uBlurHeader.y)
 #define u_sample_count (uBlurHeader.z)
 #define u_tile_mode    (uBlurHeader.w)
 
-// Samples starten bei 107 (50 * vec4 → 200 Locations 107..306)
-layout(location = 107) uniform vec4 u_samples[50];
+// Samples start at 107 (50 * vec4 → locations 107..306)
+layout(location = 108) uniform vec4 u_samples[50];
 
-// ───────────────────── Textur/Output ───────────────────────────────────────
+// ───────────────────── Textures / Output ───────────────────────────────────
 uniform sampler2D uBackgroundTexture;
 layout(location = 0) out vec4 fragColor;
 
-// ───────────────────── Aliases aus gepackten Vektoren ──────────────────────
+// ───────────────────── Aliases extracted from packed vectors ───────────────
 float uRefractiveIndex     = uOpticalProps.x;
 float uChromaticAberration = uOpticalProps.y;
 float uThickness           = uOpticalProps.z;
@@ -50,11 +62,14 @@ float uSaturation          = uLightConfig.w;
 float uLightness           = uColorAdjust.x;
 float uNumShapes           = uColorAdjust.y;
 
-// Shared-Funktionen erst NACH den Uniforms einbinden
+float rimWidthPx           = uRimParams.x;
+float rimSharpness         = uRimParams.y;
+
+// Include shared helpers after uniforms to ensure binding order is fixed.
 #include "shared.glsl"
 
 // ============================================================================
-// Kleinere Performance-Defines
+// Small performance-related defines
 // ============================================================================
 #ifndef UNION_EXTRA_PX
 #define UNION_EXTRA_PX 2.0
@@ -65,6 +80,7 @@ float uNumShapes           = uColorAdjust.y;
 #endif
 #define NORMAL_MODE 0
 
+// Fast normalizers (avoid sqrt where possible).
 vec2 fastNormalize2(vec2 v){
   float d = max(dot(v, v), LG_EPS);
   return v * inversesqrt(d);
@@ -75,7 +91,7 @@ vec3 fastNormalize3(vec3 v){
 }
 
 // ============================================================================
-// SDFs (optimiert)
+// Optimized SDFs
 // ============================================================================
 float sdfRRect(in vec2 p, in vec2 b, in float r){
   float shortest = min(b.x, b.y);
@@ -108,8 +124,9 @@ float smoothUnion(float d1, float d2, float k){
   float e = max(k - abs(d1 - d2), 0.0);
   return min(d1, d2) - (e * e) * 0.25 / k;
 }
+
+// type: 1=Squircle(n=2), 2=Ellipse, 3=RRect
 float getShapeSDF(float type, vec2 p, vec2 center, vec2 size, float r){
-  // type: 1 = Squircle(n=2), 2 = Ellipse, 3 = RRect
   vec2  hp   = p - center;
   vec2  hb   = size * 0.5;
   float d1   = sdfSquircle2(hp, hb, r);
@@ -121,6 +138,7 @@ float getShapeSDF(float type, vec2 p, vec2 center, vec2 size, float r){
   float sB  = mix(d2, s23, step(2.0, type));
   return mix(sA, sB, step(2.0, type));
 }
+
 void readShapeAt(int index, out float type, out vec2 center, out vec2 size, out float cr){
   int base = index * 6;
   type   = uShapeData[base + 0];
@@ -128,23 +146,26 @@ void readShapeAt(int index, out float type, out vec2 center, out vec2 size, out 
   size   = vec2(uShapeData[base + 3], uShapeData[base + 4]);
   cr     = uShapeData[base + 5];
 }
+
 float aabbLowerBoundD2(vec2 p, vec2 c, vec2 sz){
   vec2 h  = 0.5 * sz;
   vec2 d  = abs(p - c) - h;
   vec2 dp = max(d, vec2(0.0));
   return dot(dp, dp);
 }
+
 float sdShape(float st, vec2 c, vec2 sz, float cr, vec2 p){
   return getShapeSDF(st, p, c, sz, cr);
 }
 
 // ============================================================================
-// Szene-SDF mit Index (fast path)
+// Scene SDF with index (fast path)
 // ============================================================================
 float sceneSDF_withIndex_fast(vec2 p, out int outIdx){
   int count = int(uNumShapes + 0.5);
   if (count <= 0) { outIdx = -1; return 1e9; }
 
+  // Unroll up to four shapes for better performance on small scenes.
   if (count <= 4) {
     float st0, cr0; vec2 c0, sz0;
     readShapeAt(0, st0, c0, sz0, cr0);
@@ -175,6 +196,7 @@ float sceneSDF_withIndex_fast(vec2 p, out int outIdx){
     return unionD;
   }
 
+  // Broad phase pruning using AABB distance lower bounds.
   float margin  = uThickness + 16.0 + uBlend + UNION_EXTRA_PX;
   float margin2 = margin * margin;
 
@@ -223,7 +245,7 @@ float sceneSDF_withIndex_fast(vec2 p, out int outIdx){
 }
 
 // ============================================================================
-// Normalen – schneller Pfad
+// Normals — fast path
 // ============================================================================
 #ifndef NORMAL_FILTER_PX
 #define NORMAL_FILTER_PX 1.0
@@ -244,14 +266,18 @@ vec3 getNormal(float sd, float thickness, int idx){
   vec2 g  = vec2(dFdx(sd), dFdy(sd));
   vec2 gN = fastNormalize2(g + vec2(LG_EPS));
 
+  // Project gradient to a hemisphere based on signed distance.
   float n_cos = smoothstep(-thickness - 32.0, 0.0, sd);
   float n_sin = sqrt(max(1.0 - n_cos * n_cos, 0.0));
 
+  // No shape index → standard normal.
   if (idx < 0){
     vec2 xy = gN * n_cos;
     return fastNormalize3(vec3(xy, n_sin));
   }
 
+  // Heuristic normal shaping: emphasize mid-height and side edges to
+  // enhance perceived curvature on certain shapes.
   float st, cr; vec2 c, sz;
   readShapeAt(idx, st, c, sz, cr);
 
@@ -279,9 +305,11 @@ void main(){
   vec2 screenUV = pScreen * invSize;
 
 #ifdef IMPELLER_TARGET_OPENGLES
+  // OpenGLES uses inverted Y; flip to match texture space.
   screenUV.y = 1.0 - screenUV.y;
 #endif
 
+  // Transform the coordinate space before SDF evaluation.
   vec4 transformedCoord = uTransform * vec4(pScreen, 0.0, 1.0);
   vec2 p = transformedCoord.xy;
 
@@ -300,6 +328,7 @@ void main(){
   int   idx;
   float sd  = sceneSDF_withIndex_fast(p, idx);
 
+  // Foreground matte coverage from signed distance.
   float foregroundAlpha = 1.0 - smoothstep(-2.0, 0.0, sd);
   if (foregroundAlpha < 0.01){
     fragColor = texScreen(uBackgroundTexture, screenUV);
@@ -308,12 +337,13 @@ void main(){
 
   vec3 normal = getNormal(sd, uThickness, idx);
 
+  // Final shaded/refraction color.
   fragColor = renderLiquidGlass(
       screenUV, p, uSize,
       sd, uThickness,
       uRefractiveIndex, uChromaticAberration,
       uGlassColor, uLightDirection, uLightIntensity, uAmbientStrength,
       uBackgroundTexture, normal, foregroundAlpha,
-      /*saturation*/ uSaturation, /*lightness*/ uLightness
+      uSaturation, uLightness, rimWidthPx, rimSharpness
   );
 }

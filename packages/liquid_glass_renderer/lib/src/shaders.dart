@@ -3,7 +3,6 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:meta/meta.dart';
 
 final String _shadersRoot =
     !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST')

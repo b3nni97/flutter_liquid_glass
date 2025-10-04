@@ -196,7 +196,7 @@ void main() {
       normal,
       fg.a,                      // foregroundAlpha = Matte
       uSaturation,
-      uLightness
+      uLightness,1.5, 0.89
   );
 
 #if DEBUG_NORMALS

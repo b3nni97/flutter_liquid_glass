@@ -1,48 +1,60 @@
-// Gaussian 1D Backdrop-Blur (Impeller)
-// Pass-Richtung und Kernel kommen aus Uniforms.
+// Gaussian 1D Backdrop Blur (Impeller)
+// Pass direction and kernel are provided via uniforms. This shader is intended
+// to be used with ImageFilter.shader (runtime effect) and performs a single
+// separable Gaussian pass along either the X or Y axis.
 
 #include <flutter/runtime_effect.glsl>
 precision mediump float;
 precision mediump int;
 
-// 1) Wird von der Engine gesetzt (Pflicht bei ImageFilter.shader).
+// 1) Populated by the engine (required for ImageFilter.shader).
+//    Logical device size (in device pixels) of the filtered content.
 uniform vec2 u_size;
 
-// 2) Richtung: (1,0) = horizontal, (0,1) = vertikal
+// 2) Blur direction: (1, 0) = horizontal pass, (0, 1) = vertical pass.
 uniform vec2 u_dir;
 
-// 3) Anzahl zusammengefasster Samples (nach Lerp-Hack, Host-normalisiert)
+// 3) Number of packed samples (after kernel compaction/lerp on the host).
+//    The host provides a normalized kernel; this value controls the loop bound.
 uniform float u_sample_count;
 
-// 4) Tile-Mode: 0=clamp, 1=repeat, 2=mirror, 3=decal (transparent außerhalb)
+// 4) Tile mode for sampling outside [0, 1]^2 UVs:
+//    0 = clamp, 1 = repeat, 2 = mirror, 3 = decal (transparent outside).
 uniform float u_tile_mode;
 
-// 5) Komprimierte Samples: x = Offset in "Pixeln" entlang u_dir, z = Gewicht
+// 5) Packed kernel samples. For each entry:
+//    - x: sample offset in "pixels" along u_dir (host space, not UV)
+//    - z: normalized sample weight
+//    y and w are unused (reserved for alignment/extension).
 uniform vec4 u_samples[50];
 
-// 6) Wird von der Engine mit dem Filter-Input befüllt (erster sampler2D).
+// 6) Input texture provided by the engine as the first sampler2D.
+//    This is the source image for the backdrop filter.
 uniform sampler2D u_texture_input;
 
+// Applies the selected tile mode to the given UV coordinates.
 vec2 tile_uv(vec2 uv) {
   if (u_tile_mode < 0.5) {
-    // clamp-to-edge (kleines Epsilon zur Vermeidung von Out-Of-Range)
+    // Clamp-to-edge with a small epsilon to avoid out-of-range sampling.
     vec2 eps = 0.5 / u_size;
     return clamp(uv, eps, 1.0 - eps);
   } else if (u_tile_mode < 1.5) {
+    // Repeat.
     return fract(uv);
   } else if (u_tile_mode < 2.5) {
-    // mirror repeat
+    // Mirror repeat.
     vec2 m = mod(uv, 2.0);
     return mix(m, 2.0 - m, step(1.0, m));
   } else {
-    // decal: uv bleibt unverändert, OutOfBounds wird später zu 0
+    // Decal: leave UVs unchanged; out-of-bounds becomes transparent later.
     return uv;
   }
 }
 
+// Samples the input texture with the configured tile mode, handling decal OOB.
 vec4 sample_uv(vec2 uv) {
   if (u_tile_mode >= 2.5) {
-    // decal -> außerhalb [0,1] transparent
+    // Decal: outside [0, 1] → transparent.
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
       return vec4(0.0);
     }
@@ -56,28 +68,31 @@ void main() {
   vec2 inv_size = 1.0 / u_size;
   vec2 uv = FlutterFragCoord().xy * inv_size;
 
-  // GLES hat invertierte Y-Achse – korrigieren.
+  // OpenGLES has inverted Y coordinates; flip to match texture space.
   #ifdef IMPELLER_TARGET_OPENGLES
     uv.y = 1.0 - uv.y;
   #endif
 
-  // Early-out: kein Blur-Kernel aktiv
+  // Early-out if no kernel is active.
   if (u_sample_count < 0.5) {
     frag_color = sample_uv(uv);
     return;
   }
 
+  // Step vector in UV units for a "1 pixel" move along the chosen axis.
   vec2 step_vec = vec2(u_dir.x * inv_size.x, u_dir.y * inv_size.y);
 
   vec4 sum = vec4(0.0);
-  // Schleife bis 50, aber früh abbrechen anhand u_sample_count.
+
+  // Iterate up to the maximum kernel size but terminate early using
+  // u_sample_count. Weights are pre-normalized on the host.
   for (int i = 0; i < 50; i++) {
     if (float(i) >= u_sample_count) break;
-    float t = u_samples[i].x;     // Offset entlang der Achse (in Pixeln)
-    float w = u_samples[i].z;     // Gewicht (Host schon normalisiert)
+    float t = u_samples[i].x; // offset along axis (in pixels)
+    float w = u_samples[i].z; // normalized weight
     sum += w * sample_uv(uv + step_vec * t);
   }
 
-  // Gewichte sind Host-seitig normiert -> keine Division nötig
+  // No division required; the host provided normalized weights.
   frag_color = sum;
 }

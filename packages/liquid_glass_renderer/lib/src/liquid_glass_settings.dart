@@ -18,6 +18,8 @@ class LiquidGlassSettings with EquatableMixin {
     this.refractiveIndex = 1.51,
     this.saturation = 1.0,
     this.lightness = 1.0,
+    this.rimWidthPx = 1.5,
+    this.rimSharpness = 0.9,
   });
 
   /// Creates a new [LiquidGlassSettings] with the given settings where each
@@ -34,6 +36,8 @@ class LiquidGlassSettings with EquatableMixin {
     double lightAngle = 0.5 * pi,
     double blend = 20,
     Color glassColor = const Color.fromARGB(0, 255, 255, 255),
+    double rimWidthPx = 1.5,
+    double rimSharpness = 0.89,
   }) : this(
           refractiveIndex: 1 + (refraction / 100) * 0.2,
           thickness: depth,
@@ -46,6 +50,8 @@ class LiquidGlassSettings with EquatableMixin {
           saturation: 1.05,
           blend: blend,
           glassColor: glassColor,
+          rimWidthPx: rimWidthPx,
+          rimSharpness: rimSharpness,
         );
 
   /// The color tint of the glass effect.
@@ -110,6 +116,18 @@ class LiquidGlassSettings with EquatableMixin {
   /// Defaults to 1.0
   final double lightness;
 
+  /// Width of the highlight rim in **pixels** along the SDF edge.
+  ///
+  /// Larger values produce a visibly **thicker** rim (z. B. 2–3 px).
+  /// Default is 1.5.
+  final double rimWidthPx;
+
+  /// Sharpness (falloff) of the rim highlight.
+  ///
+  /// Higher values make the rim **harder/schmaler**, lower values weicher/breiter.
+  /// Default is 0.9.
+  final double rimSharpness;
+
   /// Creates a new [LiquidGlassSettings] with the given settings.
   LiquidGlassSettings copyWith({
     Color? glassColor,
@@ -123,6 +141,8 @@ class LiquidGlassSettings with EquatableMixin {
     double? refractiveIndex,
     double? saturation,
     double? lightness,
+    double? rimWidthPx,
+    double? rimSharpness,
   }) =>
       LiquidGlassSettings(
         glassColor: glassColor ?? this.glassColor,
@@ -136,6 +156,8 @@ class LiquidGlassSettings with EquatableMixin {
         refractiveIndex: refractiveIndex ?? this.refractiveIndex,
         saturation: saturation ?? this.saturation,
         lightness: lightness ?? this.lightness,
+        rimWidthPx: rimWidthPx ?? this.rimWidthPx,
+        rimSharpness: rimSharpness ?? this.rimSharpness,
       );
 
   @override
@@ -151,5 +173,7 @@ class LiquidGlassSettings with EquatableMixin {
         refractiveIndex,
         saturation,
         lightness,
+        rimWidthPx,
+        rimSharpness,
       ];
 }
