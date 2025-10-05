@@ -81,7 +81,7 @@ vec2  mirror01(vec2 uv){ return vec2(mirror1(uv.x), mirror1(uv.y)); }
   vec4 texScreen(sampler2D t, vec2 uv){ return texture(t, mirror01(uv)); }
 #endif
 
-// ---------- Impeller-identical tiling (for Gaussian 1D) ----------
+// ---------- Impeller-identical tiling (math only; no sampler params) ----------
 vec2 tile_uv_mode(vec2 uv, vec2 size, float mode){
   if (mode < 0.5) {
     // Clamp with a half-texel margin like Impeller
@@ -98,24 +98,9 @@ vec2 tile_uv_mode(vec2 uv, vec2 size, float mode){
     return uv;
   }
 }
-vec4 sample_uv_mode(sampler2D tex, vec2 uv, vec2 size, float mode){
-  if (mode >= 2.5) {
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
-      return vec4(0.0);
-    }
-  }
-  return texture(tex, tile_uv_mode(uv, size, mode));
-}
 
 // ────────────────────────────────────────────────────────────────────────────
-/*  Exact Impeller-style Gaussian 1D (reads Impeller-style uniforms)
-    Expected uniforms (provided by host/shader):
-      - vec2  uSize (framebuffer size)
-      - float u_dir_x, u_dir_y
-      - float u_sample_count
-      - float u_tile_mode
-      - vec4  u_samples[50]  // x = offset (px), z = weight
-*/
+/*  Exact Impeller-style Gaussian 1D (inline sampling; ES-safe) */
 // ────────────────────────────────────────────────────────────────────────────
 vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
   vec2 pixel    = vec2(1.0 / uSize.x, 1.0 / uSize.y);
@@ -129,12 +114,21 @@ vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
     int nS = int(nRaw + 0.5);
     for (int i = 0; i < 50; ++i) {
       if (i >= nS) break;
-      float t = u_samples[i].x;  // offset in pixels along axis
+      float t = u_samples[i].x;  // offset px
       float w = u_samples[i].z;  // weight
       if (!(w > 1e-6)) continue;
 
       vec2 uvOff = baseUV + step_vec * t;
-      vec4 s = sample_uv_mode(tex, uvOff, uSize, u_tile_mode);
+
+      vec4 s;
+      if (u_tile_mode >= 2.5 &&
+          (any(lessThan(uvOff, vec2(0.0))) || any(greaterThan(uvOff, vec2(1.0))))) {
+        s = vec4(0.0);
+      } else {
+        vec2 tiled = tile_uv_mode(uvOff, uSize, u_tile_mode);
+        s = texture(tex, tiled);
+      }
+
       sum  += w * s;
       wsum += w;
     }
@@ -163,9 +157,7 @@ bool _shouldApplyCA(){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-/* Lighting / Color (integrated with author’s improvements)
-   These functions operate in a perceptual-ish space and are intentionally
-   simple to keep ALU cost low while producing pleasing highlights. */
+// Lighting / Color helpers
 // ────────────────────────────────────────────────────────────────────────────
 vec3 getHighlightColor(vec3 backgroundColor, float targetBrightness) {
   float luminance = dot(backgroundColor, vec3(0.299, 0.587, 0.114));
@@ -209,28 +201,106 @@ float calculateDispersiveIndex(float baseIndex, float chromaticAberration, float
   return baseIndex - B / wavelengthSq - C / wavelengthQuad;
 }
 
-// Lightweight lighting model (no exp), compatible with normal setup
+// ────────────────────────────────────────────────────────────────────────────
+// Refraction + CA  — inner-only, symmetric lighting-gated width boost
+// ────────────────────────────────────────────────────────────────────────────
+vec4 calculateRefraction(
+  vec2 screenUV, vec3 normal, float sd, float height, float thickness,
+  float refractiveIndex, float chromaticAberration,
+  vec2 sizePx, sampler2D backgroundTexture,
+  out vec2 refractionDisplacement,
+  float rimWidthPx, float rimSharpness,
+  vec2 lightDirection, float lightIntensity
+){
+  vec3 incident = vec3(0.0, 0.0, -1.0);
+  float n       = max(refractiveIndex, 1.0001);
+  vec3 refr     = refract(incident, normal, 1.0 / n);
+
+  float baseH   = thickness * 8.0;
+  float refrL   = (height + baseH) / max(0.001, abs(refr.z));
+
+  // Inner band [-rimWidthPx, 0]
+  float wIn   = max(rimWidthPx, 1e-3);
+  float tBand = step(sd, 0.0) * (1.0 - clamp((-sd) / wIn, 0.0, 1.0));
+  float gamma = max(rimSharpness, 1e-3);
+  float edgeMask = pow(tBand, 1.0 / gamma);
+
+  // Symmetrische Lichtmaske: gleich stark bei ±L, weich auslaufend
+  vec2  L   = lightDirection;
+  vec2  nxy = lg_norm2(normal.xy);
+  float facing = abs(dot(nxy, L));               // [0..1], symmetrisch
+  float lightMask = pow(facing, 0.7);            // Spread (0.7 ≈ breiter)
+
+  lightMask *= clamp(lightIntensity, 0.0, 1.0);
+
+  float boostMask  = edgeMask * lightMask;
+  float boostScale = 1.0 + 0.9 * boostMask;      // nur innen & lichtgesteuert
+
+  // Skaliere NUR die Displacement-Länge → „bunte“ Kante wird innen breiter
+  float refrLBoost = refrL * boostScale;
+
+  vec2 dispPx = refr.xy * refrLBoost;
+  refractionDisplacement = dispPx / sizePx;
+  vec2 uvBase = screenUV + refractionDisplacement;
+
+  vec4 gS = applyGaussian1D_Impeller(backgroundTexture, uvBase);
+
+  // CA (nur wenn sichtbar / im richtigen Pass)
+  float ca = max(chromaticAberration, 0.0);
+  float dispLenPx = length(dispPx);
+  if (ca * dispLenPx < LG_CA_VIS_THRESHOLD || !_shouldApplyCA()) {
+    return gS;
+  }
+
+  vec2 dirUV = lg_norm2(refractionDisplacement + vec2(LG_EPS, LG_EPS));
+  float caPixels = clamp(dispLenPx * (1.5 * ca), 0.0, 6.0);
+  float shortSide = max(1.0, min(sizePx.x, sizePx.y));
+  vec2  caUV      = dirUV * (caPixels / shortSide);
+
+  #if LG_USE_EXPLICIT_LOD
+    float lodBias = clamp(LG_LOD_BIAS_SCALE * caPixels / 2.0, 0.0, 3.5);
+    #define SAMPLE_GAUSS_AT(_uv) textureLod(backgroundTexture, clamp((_uv), vec2(0.0), vec2(1.0)), lodBias)
+  #else
+    #define SAMPLE_GAUSS_AT(_uv) applyGaussian1D_Impeller(backgroundTexture, (_uv))
+  #endif
+
+  float r = SAMPLE_GAUSS_AT(uvBase + caUV).r;
+  float b = SAMPLE_GAUSS_AT(uvBase - caUV).b;
+
+  #undef SAMPLE_GAUSS_AT
+
+  float mixAmt = clamp(ca, 0.0, 1.0);
+  float outR = mix(gS.r, r, mixAmt);
+  float outG = gS.g;
+  float outB = mix(gS.b, b, mixAmt);
+
+  return vec4(outR, outG, outB, gS.a);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lighting — inner-only, gleiche (symmetrische) Lichtmaske
+// ────────────────────────────────────────────────────────────────────────────
 vec3 calculateLighting(
   vec2 uv, vec3 normal, float sd, float thickness, float height,
   vec2 lightDirection, float lightIntensity, float ambientStrength,
   vec3 backgroundColor, float rimWidthPx, float rimSharpness
 ){
-  float normalizedHeight = (thickness > 0.0) ? (height / thickness) : 0.0;
-  float shape = smoothstep(0.0, 0.9, 1.0 - normalizedHeight);
-  if (shape < 0.01) return vec3(0.0);
-
   float thicknessFactor = smoothstep(5.0, 7.0, thickness);
-  if (thicknessFactor < 0.01) return vec3(0.0);
+  if (thicknessFactor < 0.01 || lightIntensity < 0.01) return vec3(0.0);
 
- 
-  float w = max(rimWidthPx, 1e-3);
-  float k = max(rimSharpness, 1e-4);
-  float x = sd / w;
-  float rimFactor = 1.0 / (1.0 + k * x * x);
-  if (rimFactor < 0.01 || lightIntensity < 0.01) return vec3(0.0);
+  float wIn   = max(rimWidthPx, 1e-3);
+  float tBand = step(sd, 0.0) * (1.0 - clamp((-sd) / wIn, 0.0, 1.0));
+  float gamma = max(rimSharpness, 1e-3);
+  float rimBand = pow(tBand, 1.0 / gamma);
 
   vec2 L   = lightDirection;
   vec2 nxy = lg_norm2(normal.xy);
+
+  float facing = abs(dot(nxy, L));    // symmetrisch zu ±L
+  float lightMask = pow(facing, 0.7); // Spread (gleich wie oben)
+  float rimFactor = rimBand * lightMask;
+
+  if (rimFactor < 1e-3) return vec3(0.0);
 
   float mainL = max(0.0, dot(nxy,  L));
   float oppL  = max(0.0, dot(nxy, -L));
@@ -240,71 +310,12 @@ vec3 calculateLighting(
   vec3 directionalRim = hl * (total * total) * lightIntensity * 2.0;
   vec3 ambientRim     = getHighlightColor(backgroundColor, 0.4) * ambientStrength;
 
-  return (directionalRim + ambientRim) * rimFactor * thicknessFactor * shape;
+  return (directionalRim + ambientRim) * rimFactor * thicknessFactor;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Refraction + Chromatic Aberration (Gaussian, pass-compatible)
+// Post color ops
 // ────────────────────────────────────────────────────────────────────────────
-vec4 calculateRefraction(
-  vec2 screenUV, vec3 normal, float height, float thickness,
-  float refractiveIndex, float chromaticAberration,
-  vec2 sizePx, sampler2D backgroundTexture,
-  out vec2 refractionDisplacement
-){
-  // 1) Refraction → displacement
-  vec3 incident = vec3(0.0, 0.0, -1.0);
-  float n       = max(refractiveIndex, 1.0001);
-  vec3 refr     = refract(incident, normal, 1.0 / n);
-  float baseH   = thickness * 8.0;
-  float refrL   = (height + baseH) / max(0.001, abs(refr.z));
-
-  vec2 dispPx = refr.xy * refrL;                 // in pixels
-  refractionDisplacement = dispPx / sizePx;      // in UV
-  vec2 uvBase = screenUV + refractionDisplacement;
-
-  // Base: one Gaussian (Impeller) → G & A (separable H/V)
-  vec4 gS = applyGaussian1D_Impeller(backgroundTexture, uvBase);
-
-  // CA gating
-  float ca = max(chromaticAberration, 0.0);
-  float dispLenPx = length(dispPx);
-  if (ca * dispLenPx < LG_CA_VIS_THRESHOLD || !_shouldApplyCA()) {
-    return gS; // Invisible or the wrong pass → keep base
-  }
-
-  // Direction in UV, robustly normalized
-  vec2 dirUV = lg_norm2(refractionDisplacement + vec2(LG_EPS, LG_EPS));
-
-  // Offset proportional to CA and displacement length; clamp to avoid extremes
-  float caPixels = clamp(dispLenPx * (1.5 * ca), 0.0, 6.0);
-  float shortSide = max(1.0, min(sizePx.x, sizePx.y));
-  vec2  caUV      = dirUV * (caPixels / shortSide);
-
-  // Optional LOD bias
-  #if LG_USE_EXPLICIT_LOD
-    float lodBias = clamp(LG_LOD_BIAS_SCALE * caPixels / 2.0, 0.0, 3.5);
-    #define SAMPLE_GAUSS_AT(_uv) textureLod(backgroundTexture, clamp((_uv), vec2(0.0), vec2(1.0)), lodBias)
-  #else
-    #define SAMPLE_GAUSS_AT(_uv) applyGaussian1D_Impeller(backgroundTexture, (_uv))
-  #endif
-
-  // Two additional Gaussian samples: R forward, B backward
-  float r = SAMPLE_GAUSS_AT(uvBase + caUV).r;
-  float b = SAMPLE_GAUSS_AT(uvBase - caUV).b;
-
-  #undef SAMPLE_GAUSS_AT
-
-  // G/Alpha kept from base; mix R/B proportionally to CA (no-op when ca=0)
-  float mixAmt = clamp(ca, 0.0, 1.0);
-  float outR = mix(gS.r, r, mixAmt);
-  float outG = gS.g;
-  float outB = mix(gS.b, b, mixAmt);
-
-  return vec4(outR, outG, outB, gS.a);
-}
-
-// Apply saturation and lightness adjustments
 vec3 applySaturationLightness(vec3 color, float saturation, float lightness){
   float luminance = dot(color, vec3(0.299, 0.587, 0.114));
   vec3 saturatedColor = mix(vec3(luminance), color, saturation);
@@ -317,10 +328,8 @@ vec3 applySaturationLightness(vec3 color, float saturation, float lightness){
   return clamp(adjustedColor, 0.0, 1.0);
 }
 
-// Apply glass color tint to the refracted color
 vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
   vec4 finalColor = liquidColor;
-
   if (glassColor.a > 0.0) {
     float glassLuminance = dot(glassColor.rgb, vec3(0.299, 0.587, 0.114));
     if (glassLuminance < 0.5) {
@@ -334,12 +343,11 @@ vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
     }
     finalColor.a = liquidColor.a;
   }
-
   return finalColor;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// PUBLIC API – no Kawase parameters; fully compatible with the blur pipeline
+// PUBLIC API
 // ────────────────────────────────────────────────────────────────────────────
 vec4 renderLiquidGlass(
   vec2 screenUV, vec2 p, vec2 uSizePx,
@@ -350,20 +358,17 @@ vec4 renderLiquidGlass(
   float saturation, float lightness, float rimWidthPx, float rimSharpness
 ){
   vec4 backgroundColor = texScreen(backgroundTexture, screenUV);
-
-  if (foregroundAlpha < 0.001) {
-    return backgroundColor;
-  }
-  if (thickness < 0.01) {
-    return backgroundColor;
-  }
+  if (foregroundAlpha < 0.001) return backgroundColor;
+  if (thickness < 0.01)       return backgroundColor;
 
   float height = getHeight(sd, thickness);
 
   vec2 refractionDisplacement;
   vec4 refractColor = calculateRefraction(
-    screenUV, normal, height, thickness, refractiveIndex, chromaticAberration,
-    uSizePx, backgroundTexture, refractionDisplacement
+    screenUV, normal, sd, height, thickness, refractiveIndex, chromaticAberration,
+    uSizePx, backgroundTexture, refractionDisplacement,
+    rimWidthPx, rimSharpness,
+    lightDirection, lightIntensity
   );
 
   vec3 lighting = calculateLighting(
