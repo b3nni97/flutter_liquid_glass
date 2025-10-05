@@ -114,7 +114,7 @@ vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
     int nS = int(nRaw + 0.5);
     for (int i = 0; i < 50; ++i) {
       if (i >= nS) break;
-      float t = u_samples[i].x;  // offset px
+      float t = u_samples[i].x;  // offset in pixels along axis
       float w = u_samples[i].z;  // weight
       if (!(w > 1e-6)) continue;
 
@@ -157,7 +157,7 @@ bool _shouldApplyCA(){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Lighting / Color helpers
+/* Lighting / Color helpers */
 // ────────────────────────────────────────────────────────────────────────────
 vec3 getHighlightColor(vec3 backgroundColor, float targetBrightness) {
   float luminance = dot(backgroundColor, vec3(0.299, 0.587, 0.114));
@@ -202,7 +202,55 @@ float calculateDispersiveIndex(float baseIndex, float chromaticAberration, float
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Refraction + CA  — inner-only, symmetric lighting-gated width boost
+// Rim masks (inner-only) – band & core, pixel-accurate via |∇sd|
+struct RimMasks { float band; float core; };
+
+RimMasks rimMasksInner(float sd, float rimWidthPx, float rimSharpness){
+  // Convert a pixel width (rimWidthPx) into an SDF-width using gradient magnitude.
+  vec2  g    = vec2(dFdx(sd), dFdy(sd));
+  float gmag = max(length(g), 1e-6);
+  float wSDF = max(rimWidthPx, 0.0) * gmag;
+
+  // 0..1 only for sd in [-wSDF, 0] (inside the shape)
+  float edge01 = step(sd, 0.0) * smoothstep(-wSDF, 0.0, sd);
+
+  // Outer band (overall rim thickness) and a tighter core (sharp inner fringe).
+  float gamma = max(rimSharpness, 1e-3);
+  float band  = pow(edge01, 1.0 / gamma);
+
+  float coreExp = mix(3.0, 1.1, clamp(rimWidthPx / 64.0, 0.0, 1.0));
+  float core    = pow(edge01, coreExp / gamma);
+
+  RimMasks m; m.band = band; m.core = core; return m;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// White Fresnel-like fringe (under the rim light) – thickens the bright edge
+// without softening the geometric contour.
+float fresnelSchlick(float cosTheta, float F0){
+  return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+vec3 applyWhiteFringe(
+  vec3 baseColor, vec3 normal, float sd, float rimWidthPx, float rimSharpness
+){
+  RimMasks rm = rimMasksInner(sd, rimWidthPx, rimSharpness);
+
+  // Fresnel relative to the view vector (V=(0,0,1)), cos = N·V = normal.z.
+  float cosNV = clamp(abs(normal.z), 0.0, 1.0);
+  float F = fresnelSchlick(cosNV, 0.04); // dielectric glass F0 ≈ 0.04
+
+  // Amount of “pull toward white”: band controls width, core concentrates the inner fringe.
+  float bandGain = mix(0.25, 0.65, clamp(rimWidthPx / 64.0, 0.0, 1.0));
+  float coreGain = mix(0.15, 0.40, clamp(rimWidthPx / 64.0, 0.0, 1.0));
+
+  float amt = rm.band * bandGain + rm.core * coreGain;
+  amt *= F;
+
+  return mix(baseColor, vec3(1.0), clamp(amt, 0.0, 1.0));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Refraction + Chromatic Aberration (Gaussian, pass-compatible)
 // ────────────────────────────────────────────────────────────────────────────
 vec4 calculateRefraction(
   vec2 screenUV, vec3 normal, float sd, float height, float thickness,
@@ -212,51 +260,45 @@ vec4 calculateRefraction(
   float rimWidthPx, float rimSharpness,
   vec2 lightDirection, float lightIntensity
 ){
+  // 1) Refraction → displacement
   vec3 incident = vec3(0.0, 0.0, -1.0);
   float n       = max(refractiveIndex, 1.0001);
   vec3 refr     = refract(incident, normal, 1.0 / n);
-
   float baseH   = thickness * 8.0;
   float refrL   = (height + baseH) / max(0.001, abs(refr.z));
 
-  // Inner band [-rimWidthPx, 0]
-  float wIn   = max(rimWidthPx, 1e-3);
-  float tBand = step(sd, 0.0) * (1.0 - clamp((-sd) / wIn, 0.0, 1.0));
-  float gamma = max(rimSharpness, 1e-3);
-  float edgeMask = pow(tBand, 1.0 / gamma);
+  // Subtle displacement boost gated by light and inner rim band,
+  // so the colored edge becomes visibly thicker without a soft overlay.
+  RimMasks rm     = rimMasksInner(sd, rimWidthPx, rimSharpness);
+  vec2  L         = lightDirection;
+  vec2  nxy       = lg_norm2(normal.xy);
+  float facing    = abs(dot(nxy, L));
+  float lightMask = pow(facing, 0.7) * clamp(lightIntensity, 0.0, 1.0);
+  float boost     = 1.0 + 0.4 * (rm.band * lightMask);
 
-  // Symmetrische Lichtmaske: gleich stark bei ±L, weich auslaufend
-  vec2  L   = lightDirection;
-  vec2  nxy = lg_norm2(normal.xy);
-  float facing = abs(dot(nxy, L));               // [0..1], symmetrisch
-  float lightMask = pow(facing, 0.7);            // Spread (0.7 ≈ breiter)
-
-  lightMask *= clamp(lightIntensity, 0.0, 1.0);
-
-  float boostMask  = edgeMask * lightMask;
-  float boostScale = 1.0 + 0.9 * boostMask;      // nur innen & lichtgesteuert
-
-  // Skaliere NUR die Displacement-Länge → „bunte“ Kante wird innen breiter
-  float refrLBoost = refrL * boostScale;
-
-  vec2 dispPx = refr.xy * refrLBoost;
-  refractionDisplacement = dispPx / sizePx;
+  vec2 dispPx = refr.xy * (refrL * boost);       // in pixels
+  refractionDisplacement = dispPx / sizePx;      // in UV
   vec2 uvBase = screenUV + refractionDisplacement;
 
+  // Base: one Gaussian (Impeller)
   vec4 gS = applyGaussian1D_Impeller(backgroundTexture, uvBase);
 
-  // CA (nur wenn sichtbar / im richtigen Pass)
+  // CA gating
   float ca = max(chromaticAberration, 0.0);
   float dispLenPx = length(dispPx);
   if (ca * dispLenPx < LG_CA_VIS_THRESHOLD || !_shouldApplyCA()) {
-    return gS;
+    return gS; // Invisible or the wrong pass → keep base
   }
 
+  // Direction in UV, robustly normalized
   vec2 dirUV = lg_norm2(refractionDisplacement + vec2(LG_EPS, LG_EPS));
+
+  // Offset proportional to CA and displacement length; clamp to avoid extremes
   float caPixels = clamp(dispLenPx * (1.5 * ca), 0.0, 6.0);
   float shortSide = max(1.0, min(sizePx.x, sizePx.y));
   vec2  caUV      = dirUV * (caPixels / shortSide);
 
+  // Optional LOD bias
   #if LG_USE_EXPLICIT_LOD
     float lodBias = clamp(LG_LOD_BIAS_SCALE * caPixels / 2.0, 0.0, 3.5);
     #define SAMPLE_GAUSS_AT(_uv) textureLod(backgroundTexture, clamp((_uv), vec2(0.0), vec2(1.0)), lodBias)
@@ -264,11 +306,13 @@ vec4 calculateRefraction(
     #define SAMPLE_GAUSS_AT(_uv) applyGaussian1D_Impeller(backgroundTexture, (_uv))
   #endif
 
+  // Two additional Gaussian samples: R forward, B backward
   float r = SAMPLE_GAUSS_AT(uvBase + caUV).r;
   float b = SAMPLE_GAUSS_AT(uvBase - caUV).b;
 
   #undef SAMPLE_GAUSS_AT
 
+  // G/Alpha kept from base; mix R/B proportionally to CA (no-op when ca=0)
   float mixAmt = clamp(ca, 0.0, 1.0);
   float outR = mix(gS.r, r, mixAmt);
   float outG = gS.g;
@@ -278,7 +322,7 @@ vec4 calculateRefraction(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Lighting — inner-only, gleiche (symmetrische) Lichtmaske
+// Lighting — inner-only, uses the same rim masks; symmetric w.r.t. ±L
 // ────────────────────────────────────────────────────────────────────────────
 vec3 calculateLighting(
   vec2 uv, vec3 normal, float sd, float thickness, float height,
@@ -288,19 +332,15 @@ vec3 calculateLighting(
   float thicknessFactor = smoothstep(5.0, 7.0, thickness);
   if (thicknessFactor < 0.01 || lightIntensity < 0.01) return vec3(0.0);
 
-  float wIn   = max(rimWidthPx, 1e-3);
-  float tBand = step(sd, 0.0) * (1.0 - clamp((-sd) / wIn, 0.0, 1.0));
-  float gamma = max(rimSharpness, 1e-3);
-  float rimBand = pow(tBand, 1.0 / gamma);
+  RimMasks rm   = rimMasksInner(sd, rimWidthPx, rimSharpness);
 
-  vec2 L   = lightDirection;
-  vec2 nxy = lg_norm2(normal.xy);
+  vec2  L        = lightDirection;
+  vec2  nxy      = lg_norm2(normal.xy);
+  float facing   = abs(dot(nxy, L));       // symmetric for ±L
+  float lightMask= pow(facing, 0.7);
 
-  float facing = abs(dot(nxy, L));    // symmetrisch zu ±L
-  float lightMask = pow(facing, 0.7); // Spread (gleich wie oben)
-  float rimFactor = rimBand * lightMask;
-
-  if (rimFactor < 1e-3) return vec3(0.0);
+  float rimMask  = rm.band * lightMask;
+  if (rimMask < 1e-3) return vec3(0.0);
 
   float mainL = max(0.0, dot(nxy,  L));
   float oppL  = max(0.0, dot(nxy, -L));
@@ -310,7 +350,15 @@ vec3 calculateLighting(
   vec3 directionalRim = hl * (total * total) * lightIntensity * 2.0;
   vec3 ambientRim     = getHighlightColor(backgroundColor, 0.4) * ambientStrength;
 
-  return (directionalRim + ambientRim) * rimFactor * thicknessFactor;
+  vec3 lighting = (directionalRim + ambientRim);
+
+  // Slight pull towards white only in the core to improve perceived sparkle.
+  float whitePull  = 0.55;
+  float coreGain   = mix(0.16, 0.36, clamp(rimWidthPx/64.0, 0.0, 1.0));
+  vec3  towardWhite= mix(lighting, vec3(1.0), whitePull);
+  lighting = mix(lighting, towardWhite, rm.core * coreGain);
+
+  return lighting * rimMask * thicknessFactor;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -328,8 +376,10 @@ vec3 applySaturationLightness(vec3 color, float saturation, float lightness){
   return clamp(adjustedColor, 0.0, 1.0);
 }
 
+// Apply glass color tint to the refracted color
 vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
   vec4 finalColor = liquidColor;
+
   if (glassColor.a > 0.0) {
     float glassLuminance = dot(glassColor.rgb, vec3(0.299, 0.587, 0.114));
     if (glassLuminance < 0.5) {
@@ -347,7 +397,7 @@ vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// PUBLIC API
+// PUBLIC API – no Kawase parameters; fully compatible with the blur pipeline
 // ────────────────────────────────────────────────────────────────────────────
 vec4 renderLiquidGlass(
   vec2 screenUV, vec2 p, vec2 uSizePx,
@@ -358,6 +408,7 @@ vec4 renderLiquidGlass(
   float saturation, float lightness, float rimWidthPx, float rimSharpness
 ){
   vec4 backgroundColor = texScreen(backgroundTexture, screenUV);
+
   if (foregroundAlpha < 0.001) return backgroundColor;
   if (thickness < 0.01)       return backgroundColor;
 
@@ -371,6 +422,9 @@ vec4 renderLiquidGlass(
     lightDirection, lightIntensity
   );
 
+  // Widen the bright inner edge beneath the rim light.
+  refractColor.rgb = applyWhiteFringe(refractColor.rgb, normal, sd, rimWidthPx, rimSharpness);
+
   vec3 lighting = calculateLighting(
     screenUV, normal, sd, thickness, height,
     lightDirection, lightIntensity, ambientStrength,
@@ -381,7 +435,12 @@ vec4 renderLiquidGlass(
   finalColor.rgb += lighting;
   finalColor.rgb  = applySaturationLightness(finalColor.rgb, saturation, lightness);
 
-  return mix(backgroundColor, finalColor, foregroundAlpha);
+  // Optional: slight edge alpha lift based on the inner rim band.
+  RimMasks rm = rimMasksInner(sd, rimWidthPx, rimSharpness);
+  float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPx/64.0, 0.0, 1.0));
+  float mixA = clamp(max(foregroundAlpha, rm.band * edgeAlphaGain), 0.0, 1.0);
+
+  return mix(backgroundColor, finalColor, mixA);
 }
 
 // Optional: debug normals overlay
