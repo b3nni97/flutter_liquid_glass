@@ -13,27 +13,38 @@
 #define MAX_VSAMPLES 64
 #endif
 
-// Performance/quality switches (can be overridden by the host via #define)
 #ifndef LG_CA_VIS_THRESHOLD
-#define LG_CA_VIS_THRESHOLD 1e-3  // Visibility threshold for CA (ca*dispLenPx)
+#define LG_CA_VIS_THRESHOLD 1e-3
 #endif
 #ifndef LG_USE_EXPLICIT_LOD
-#define LG_USE_EXPLICIT_LOD 0     // 1 = use textureLod with bias under strong refraction
+#define LG_USE_EXPLICIT_LOD 0
 #endif
 #ifndef LG_LOD_BIAS_SCALE
 #define LG_LOD_BIAS_SCALE 0.75
 #endif
 
-// CA pass control for separable blur
 #ifndef LG_CA_PASS_MODE
 // 0 = both passes, 1 = vertical only (|u_dir_y| >= |u_dir_x|), 2 = horizontal only
 #define LG_CA_PASS_MODE 1
 #endif
 
-// Numerical stability
 #ifndef LG_EPS
 #define LG_EPS 1e-8
 #endif
+
+// ---------- Host-provided uniforms (declared in main .frag) ----------
+// Base blur kernel header/taps, size, etc. exist in deinem Hauptshader.
+// Wir listen hier nur Glow-spezifische Inputs, die diese Datei nutzt:
+//
+// uniform float uTouchCount_f;   // 0..8
+// uniform vec4  uTouches[8];     // (x_px, y_px, radius_px, fade_px)
+// uniform vec4  uGlowParams;     // (strength, power, tintMode, insideOnly)
+// uniform vec4  uGlowColor;      // (r, g, b, a)  -> a = Tint-Intensität
+//
+// NEU (für GlowStyle-Overrides):
+// uniform vec4  uGlowOverrides;  // (lightness, saturation, blurSigmaPx, mix)
+// uniform vec4  uGlowFlags;      // (hasLightness, hasSaturation, hasBlur, hasGlassColor)
+// uniform vec4  uGlowGlass;      // (glass_r, glass_g, glass_b, glass_a)
 
 // ---------- Small utilities ----------
 float hash12(vec2 p){
@@ -50,7 +61,7 @@ vec3 lg_norm3(vec3 v){
   return v * inversesqrt(d);
 }
 
-// ---------- sRGB helpers (define once) ----------
+// ---------- sRGB helpers ----------
 #ifndef LG_SRGB_HELPERS_DEFINED
 #define LG_SRGB_HELPERS_DEFINED 1
 #ifndef USE_EXACT_SRGB
@@ -81,26 +92,22 @@ vec2  mirror01(vec2 uv){ return vec2(mirror1(uv.x), mirror1(uv.y)); }
   vec4 texScreen(sampler2D t, vec2 uv){ return texture(t, mirror01(uv)); }
 #endif
 
-// ---------- Impeller-identical tiling (math only; no sampler params) ----------
 vec2 tile_uv_mode(vec2 uv, vec2 size, float mode){
   if (mode < 0.5) {
-    // Clamp with a half-texel margin like Impeller
     vec2 eps = 0.5 / size;
     return clamp(uv, eps, vec2(1.0) - eps);
   } else if (mode < 1.5) {
-    return fract(uv); // repeat
+    return fract(uv);
   } else if (mode < 2.5) {
-    // mirror
     vec2 m = mod(uv, 2.0);
     return mix(m, 2.0 - m, step(1.0, m));
   } else {
-    // decal: leave UV as-is; out-of-bounds handled separately
-    return uv;
+    return uv; // decal
   }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-/*  Exact Impeller-style Gaussian 1D (inline sampling; ES-safe) */
+// Impeller 1D Gaussian (inline); benötigt u_* aus dem Host
 // ────────────────────────────────────────────────────────────────────────────
 vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
   vec2 pixel    = vec2(1.0 / uSize.x, 1.0 / uSize.y);
@@ -114,7 +121,7 @@ vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
     int nS = int(nRaw + 0.5);
     for (int i = 0; i < 50; ++i) {
       if (i >= nS) break;
-      float t = u_samples[i].x;  // offset in pixels along axis
+      float t = u_samples[i].x;  // offset px
       float w = u_samples[i].z;  // weight
       if (!(w > 1e-6)) continue;
 
@@ -136,32 +143,26 @@ vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
 
   if (wsum > 1e-6) return sum / wsum;
 
-  // Fallback: clamped sample at base UV with half-texel guard
   vec2 eps = vec2(0.5 / uSize.x, 0.5 / uSize.y);
   return texture(tex, clamp(baseUV, eps, vec2(1.0) - eps));
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Pass logic for CA to avoid double work in separable blur
-// ────────────────────────────────────────────────────────────────────────────
+// CA-pass gating
 bool _shouldApplyCA(){
 #if LG_CA_PASS_MODE == 0
   return true;
 #elif LG_CA_PASS_MODE == 1
-  // Vertical pass only (|dir_y| dominates)
   return (abs(u_dir_y) >= abs(u_dir_x));
 #else
-  // Horizontal pass only
   return (abs(u_dir_x) > abs(u_dir_y));
 #endif
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-/* Lighting / Color helpers */
+// Lighting / Color helpers
 // ────────────────────────────────────────────────────────────────────────────
 vec3 getHighlightColor(vec3 backgroundColor, float targetBrightness) {
   float luminance = dot(backgroundColor, vec3(0.299, 0.587, 0.114));
-
   float maxC = max(max(backgroundColor.r, backgroundColor.g), backgroundColor.b);
   float minC = min(min(backgroundColor.r, backgroundColor.g), backgroundColor.b);
   float saturation = maxC > 0.0 ? (maxC - minC) / maxC : 0.0;
@@ -191,7 +192,7 @@ float getHeight(float sd, float thickness){
   return sqrt(max(0.0, thickness*thickness - x*x));
 }
 
-// Inverted dispersion: “red refracts more than blue”
+// „umgedrehte“ Dispersion
 float calculateDispersiveIndex(float baseIndex, float chromaticAberration, float wavelength) {
   if (chromaticAberration < 0.001) return baseIndex;
   float wavelengthSq   = wavelength * wavelength;
@@ -201,20 +202,16 @@ float calculateDispersiveIndex(float baseIndex, float chromaticAberration, float
   return baseIndex - B / wavelengthSq - C / wavelengthQuad;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Rim masks (inner-only) – band & core, pixel-accurate via |∇sd|
+// Rim masks
 struct RimMasks { float band; float core; };
 
 RimMasks rimMasksInner(float sd, float rimWidthPx, float rimSharpness){
-  // Convert a pixel width (rimWidthPx) into an SDF-width using gradient magnitude.
   vec2  g    = vec2(dFdx(sd), dFdy(sd));
   float gmag = max(length(g), 1e-6);
   float wSDF = max(rimWidthPx, 0.0) * gmag;
 
-  // 0..1 only for sd in [-wSDF, 0] (inside the shape)
   float edge01 = step(sd, 0.0) * smoothstep(-wSDF, 0.0, sd);
 
-  // Outer band (overall rim thickness) and a tighter core (sharp inner fringe).
   float gamma = max(rimSharpness, 1e-3);
   float band  = pow(edge01, 1.0 / gamma);
 
@@ -224,33 +221,22 @@ RimMasks rimMasksInner(float sd, float rimWidthPx, float rimSharpness){
   RimMasks m; m.band = band; m.core = core; return m;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// White Fresnel-like fringe (under the rim light) – thickens the bright edge
-// without softening the geometric contour.
 float fresnelSchlick(float cosTheta, float F0){
   return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
 }
-vec3 applyWhiteFringe(
-  vec3 baseColor, vec3 normal, float sd, float rimWidthPx, float rimSharpness
-){
+vec3 applyWhiteFringe(vec3 baseColor, vec3 normal, float sd, float rimWidthPx, float rimSharpness){
   RimMasks rm = rimMasksInner(sd, rimWidthPx, rimSharpness);
-
-  // Fresnel relative to the view vector (V=(0,0,1)), cos = N·V = normal.z.
   float cosNV = clamp(abs(normal.z), 0.0, 1.0);
-  float F = fresnelSchlick(cosNV, 0.04); // dielectric glass F0 ≈ 0.04
-
-  // Amount of “pull toward white”: band controls width, core concentrates the inner fringe.
+  float F = fresnelSchlick(cosNV, 0.04);
   float bandGain = mix(0.25, 0.65, clamp(rimWidthPx / 64.0, 0.0, 1.0));
   float coreGain = mix(0.15, 0.40, clamp(rimWidthPx / 64.0, 0.0, 1.0));
-
   float amt = rm.band * bandGain + rm.core * coreGain;
   amt *= F;
-
   return mix(baseColor, vec3(1.0), clamp(amt, 0.0, 1.0));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Refraction + Chromatic Aberration (Gaussian, pass-compatible)
+// Refraction + CA
 // ────────────────────────────────────────────────────────────────────────────
 vec4 calculateRefraction(
   vec2 screenUV, vec3 normal, float sd, float height, float thickness,
@@ -260,15 +246,12 @@ vec4 calculateRefraction(
   float rimWidthPx, float rimSharpness,
   vec2 lightDirection, float lightIntensity
 ){
-  // 1) Refraction → displacement
   vec3 incident = vec3(0.0, 0.0, -1.0);
   float n       = max(refractiveIndex, 1.0001);
   vec3 refr     = refract(incident, normal, 1.0 / n);
   float baseH   = thickness * 8.0;
   float refrL   = (height + baseH) / max(0.001, abs(refr.z));
 
-  // Subtle displacement boost gated by light and inner rim band,
-  // so the colored edge becomes visibly thicker without a soft overlay.
   RimMasks rm     = rimMasksInner(sd, rimWidthPx, rimSharpness);
   vec2  L         = lightDirection;
   vec2  nxy       = lg_norm2(normal.xy);
@@ -276,29 +259,23 @@ vec4 calculateRefraction(
   float lightMask = pow(facing, 0.7) * clamp(lightIntensity, 0.0, 1.0);
   float boost     = 1.0 + 0.4 * (rm.band * lightMask);
 
-  vec2 dispPx = refr.xy * (refrL * boost);       // in pixels
-  refractionDisplacement = dispPx / sizePx;      // in UV
+  vec2 dispPx = refr.xy * (refrL * boost);
+  refractionDisplacement = dispPx / sizePx;
   vec2 uvBase = screenUV + refractionDisplacement;
 
-  // Base: one Gaussian (Impeller)
   vec4 gS = applyGaussian1D_Impeller(backgroundTexture, uvBase);
 
-  // CA gating
   float ca = max(chromaticAberration, 0.0);
   float dispLenPx = length(dispPx);
   if (ca * dispLenPx < LG_CA_VIS_THRESHOLD || !_shouldApplyCA()) {
-    return gS; // Invisible or the wrong pass → keep base
+    return gS;
   }
 
-  // Direction in UV, robustly normalized
   vec2 dirUV = lg_norm2(refractionDisplacement + vec2(LG_EPS, LG_EPS));
-
-  // Offset proportional to CA and displacement length; clamp to avoid extremes
   float caPixels = clamp(dispLenPx * (1.5 * ca), 0.0, 6.0);
   float shortSide = max(1.0, min(sizePx.x, sizePx.y));
   vec2  caUV      = dirUV * (caPixels / shortSide);
 
-  // Optional LOD bias
   #if LG_USE_EXPLICIT_LOD
     float lodBias = clamp(LG_LOD_BIAS_SCALE * caPixels / 2.0, 0.0, 3.5);
     #define SAMPLE_GAUSS_AT(_uv) textureLod(backgroundTexture, clamp((_uv), vec2(0.0), vec2(1.0)), lodBias)
@@ -306,13 +283,11 @@ vec4 calculateRefraction(
     #define SAMPLE_GAUSS_AT(_uv) applyGaussian1D_Impeller(backgroundTexture, (_uv))
   #endif
 
-  // Two additional Gaussian samples: R forward, B backward
   float r = SAMPLE_GAUSS_AT(uvBase + caUV).r;
   float b = SAMPLE_GAUSS_AT(uvBase - caUV).b;
 
   #undef SAMPLE_GAUSS_AT
 
-  // G/Alpha kept from base; mix R/B proportionally to CA (no-op when ca=0)
   float mixAmt = clamp(ca, 0.0, 1.0);
   float outR = mix(gS.r, r, mixAmt);
   float outG = gS.g;
@@ -322,7 +297,7 @@ vec4 calculateRefraction(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Lighting — inner-only, uses the same rim masks; symmetric w.r.t. ±L
+// Lighting
 // ────────────────────────────────────────────────────────────────────────────
 vec3 calculateLighting(
   vec2 uv, vec3 normal, float sd, float thickness, float height,
@@ -333,12 +308,10 @@ vec3 calculateLighting(
   if (thicknessFactor < 0.01 || lightIntensity < 0.01) return vec3(0.0);
 
   RimMasks rm   = rimMasksInner(sd, rimWidthPx, rimSharpness);
-
   vec2  L        = lightDirection;
   vec2  nxy      = lg_norm2(normal.xy);
-  float facing   = abs(dot(nxy, L));       // symmetric for ±L
+  float facing   = abs(dot(nxy, L));
   float lightMask= pow(facing, 0.7);
-
   float rimMask  = rm.band * lightMask;
   if (rimMask < 1e-3) return vec3(0.0);
 
@@ -352,7 +325,6 @@ vec3 calculateLighting(
 
   vec3 lighting = (directionalRim + ambientRim);
 
-  // Slight pull towards white only in the core to improve perceived sparkle.
   float whitePull  = 0.55;
   float coreGain   = mix(0.16, 0.36, clamp(rimWidthPx/64.0, 0.0, 1.0));
   vec3  towardWhite= mix(lighting, vec3(1.0), whitePull);
@@ -367,19 +339,14 @@ vec3 calculateLighting(
 vec3 applySaturationLightness(vec3 color, float saturation, float lightness){
   float luminance = dot(color, vec3(0.299, 0.587, 0.114));
   vec3 saturatedColor = mix(vec3(luminance), color, saturation);
-  vec3 adjustedColor;
-  if (lightness > 1.0) {
-    adjustedColor = mix(saturatedColor, vec3(1.0), lightness - 1.0);
-  } else {
-    adjustedColor = saturatedColor * lightness;
-  }
+  vec3 adjustedColor = (lightness > 1.0)
+                       ? mix(saturatedColor, vec3(1.0), lightness - 1.0)
+                       : saturatedColor * lightness;
   return clamp(adjustedColor, 0.0, 1.0);
 }
 
-// Apply glass color tint to the refracted color
 vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
   vec4 finalColor = liquidColor;
-
   if (glassColor.a > 0.0) {
     float glassLuminance = dot(glassColor.rgb, vec3(0.299, 0.587, 0.114));
     if (glassLuminance < 0.5) {
@@ -397,7 +364,55 @@ vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// PUBLIC API – no Kawase parameters; fully compatible with the blur pipeline
+// Glow helpers: Maske & lokaler Zusatz-Blur (isotrop, kleiner Kernel)
+// ────────────────────────────────────────────────────────────────────────────
+float glowTouchMask(vec2 pPx, float insideOnly, float sd){
+  float inMask = (insideOnly >= 0.5) ? step(sd, 0.0) : 1.0;
+  float n = uTouchCount_f;
+  if (!(n > 0.5)) return 0.0;
+
+  float m = 0.0;
+  for (int i=0; i<8; ++i){
+    if (i >= int(n)) break;
+    vec4 tp = uTouches[i];
+    float d = length(pPx - tp.xy);
+    float inner = tp.z;
+    float outer = tp.z + max(tp.w, 1e-3);
+    float mi = smoothstep(outer, inner, d);
+    m = max(m, mi);
+  }
+  return m * inMask;
+}
+
+// schneller 2D-Gaussian-Approx (9 Samples) um *zusätzlichen* lokalen Blur zu simulieren
+vec4 gaussianApprox9(sampler2D tex, vec2 uv, float sigmaPx, vec2 sizePx){
+  if (sigmaPx <= 0.01) return texScreen(tex, uv);
+  // einfache, isotrope 3x3-Gewichtung
+  vec2 px = 1.0 / sizePx;
+  float s = clamp(sigmaPx, 0.0, 6.0);
+  // Gewichte grob normalisiert
+  float w0 = 0.227027; // center
+  float w1 = 0.194594;
+  float w2 = 0.121621;
+
+  vec4 c  = texScreen(tex, uv) * w0;
+  c += texScreen(tex, uv + vec2(px.x, 0.0)) * w1;
+  c += texScreen(tex, uv - vec2(px.x, 0.0)) * w1;
+  c += texScreen(tex, uv + vec2(0.0, px.y)) * w1;
+  c += texScreen(tex, uv - vec2(0.0, px.y)) * w1;
+
+  c += texScreen(tex, uv + vec2(px.x, px.y)) * w2;
+  c += texScreen(tex, uv + vec2(-px.x, px.y)) * w2;
+  c += texScreen(tex, uv + vec2(px.x, -px.y)) * w2;
+  c += texScreen(tex, uv + vec2(-px.x, -px.y)) * w2;
+
+  // skaliere Effizienz grob mit sigma (linearer Mix mit original)
+  float t = clamp((s - 1.0) / 5.0, 0.0, 1.0);
+  return mix(texScreen(tex, uv), c, t);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// PUBLIC API
 // ────────────────────────────────────────────────────────────────────────────
 vec4 renderLiquidGlass(
   vec2 screenUV, vec2 p, vec2 uSizePx,
@@ -408,22 +423,21 @@ vec4 renderLiquidGlass(
   float saturation, float lightness, float rimWidthPx, float rimSharpness
 ){
   vec4 backgroundColor = texScreen(backgroundTexture, screenUV);
-
   if (foregroundAlpha < 0.001) return backgroundColor;
   if (thickness < 0.01)       return backgroundColor;
 
   float height = getHeight(sd, thickness);
 
   vec2 refractionDisplacement;
-  vec4 refractColor = calculateRefraction(
-    screenUV, normal, sd, height, thickness, refractiveIndex, chromaticAberration,
+  vec4 refractColorBase = calculateRefraction(
+    screenUV, normal, sd, height, thickness,
+    refractiveIndex, chromaticAberration,
     uSizePx, backgroundTexture, refractionDisplacement,
-    rimWidthPx, rimSharpness,
-    lightDirection, lightIntensity
+    rimWidthPx, rimSharpness, lightDirection, lightIntensity
   );
 
-  // Widen the bright inner edge beneath the rim light.
-  refractColor.rgb = applyWhiteFringe(refractColor.rgb, normal, sd, rimWidthPx, rimSharpness);
+  // Sparkle am Rand
+  refractColorBase.rgb = applyWhiteFringe(refractColorBase.rgb, normal, sd, rimWidthPx, rimSharpness);
 
   vec3 lighting = calculateLighting(
     screenUV, normal, sd, thickness, height,
@@ -431,19 +445,94 @@ vec4 renderLiquidGlass(
     backgroundColor.rgb, rimWidthPx, rimSharpness
   );
 
-  vec4 finalColor = applyGlassColor(refractColor, glassColor);
-  finalColor.rgb += lighting;
-  finalColor.rgb  = applySaturationLightness(finalColor.rgb, saturation, lightness);
+  // Standard-Pipeline (ohne Glow-Override)
+  vec4 coloredBase = applyGlassColor(refractColorBase, glassColor);
+  coloredBase.rgb += lighting;
+  coloredBase.rgb  = applySaturationLightness(coloredBase.rgb, saturation, lightness);
 
-  // Optional: slight edge alpha lift based on the inner rim band.
+  // ───────────── Glow-Region mit Style-Overrides ─────────────
+  float gStrength  = uGlowParams.x;
+  float gPower     = max(uGlowParams.y, 0.0001);
+  float gTintMode  = uGlowParams.z;
+  float gInside    = uGlowParams.w;
+
+  // Flags & Override-Werte
+  float hasL = uGlowFlags.x;
+  float hasS = uGlowFlags.y;
+  float hasB = uGlowFlags.z;
+  float hasG = uGlowFlags.w;
+
+  float oLight = uGlowOverrides.x;   // Ziel-Lightness
+  float oSatu  = uGlowOverrides.y;   // Ziel-Saturation
+  float oBlur  = uGlowOverrides.z;   // Ziel-Blur (Sigma px)
+  float oMix   = clamp(uGlowOverrides.w, 0.0, 1.0); // Max-Blend (GlowStyle.mix)
+
+  vec2 uvBase = screenUV + refractionDisplacement; // Basis-UV nach Refraction
+
+  vec4 outColor = coloredBase;
+
+  if (gStrength > 0.0001 && uTouchCount_f > 0.5){
+    vec2 pPx = screenUV * uSizePx;
+    float maskRaw = glowTouchMask(pPx, gInside, sd);
+    if (maskRaw > 0.0){
+      // Mask shaping: power & strength & mix
+      float shaped = pow(clamp(maskRaw, 0.0, 1.0), gPower) * gStrength * oMix;
+      shaped = clamp(shaped, 0.0, 1.0);
+
+      // Ziel-Parameter bestimmen (fallback auf global)
+      float tLight = (hasL > 0.5) ? oLight : lightness;
+      float tSatu  = (hasS > 0.5) ? oSatu  : saturation;
+      vec4 tGlass  = (hasG > 0.5) ? uGlowGlass : glassColor;
+
+      // Parametrischer Mix zwischen globalen Parametern und Zielwerten.
+      float effLight = mix(lightness, tLight, shaped);
+      float effSatu  = mix(saturation, tSatu, shaped);
+      vec4  effGlass = mix(glassColor, tGlass, shaped);
+
+      // Optionaler lokaler Zusatz-Blur über dem globalen Blur
+      float extraSigma = 0.0;
+      if (hasB > 0.5) {
+        // oBlur ist "Ziel-Gesamtblur": ziehe den globalen ab → Extra
+        extraSigma = max(oBlur - uGlobalBlurSigma, 0.0); // uGlobalBlurSigma = Basis-Sigma (Host setzen!)
+      }
+
+      // Ausgangs-Refraktfarbe ggf. lokal stärker blur’en
+      vec4 refractLocal = refractColorBase;
+      if (extraSigma > 0.01){
+        refractLocal = gaussianApprox9(backgroundTexture, uvBase, extraSigma, uSize);
+      }
+
+      // Re-Coloring mit effektiven Parametern
+      vec4 coloredLocal = applyGlassColor(refractLocal, effGlass);
+      coloredLocal.rgb += lighting;
+      coloredLocal.rgb  = applySaturationLightness(coloredLocal.rgb, effSatu, effLight);
+
+      // Zusatz-Tint gemäß tintMode (white / background / fixed uGlowColor)
+      vec3 tint;
+      if (gTintMode < 0.5) {
+        tint = vec3(1.0);
+      } else if (gTintMode < 1.5) {
+        tint = getHighlightColor(backgroundColor.rgb, 1.0);
+      } else {
+        tint = uGlowColor.rgb;
+      }
+      vec4 tintGlass = vec4(tint, clamp(uGlowColor.a, 0.0, 1.0) * shaped);
+      coloredLocal = applyGlassColor(coloredLocal, tintGlass);
+
+      // In die Basisausgabe einblenden
+      outColor = mix(coloredBase, coloredLocal, shaped);
+    }
+  }
+
+  // Rand-Alpha leicht anheben
   RimMasks rm = rimMasksInner(sd, rimWidthPx, rimSharpness);
   float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPx/64.0, 0.0, 1.0));
   float mixA = clamp(max(foregroundAlpha, rm.band * edgeAlphaGain), 0.0, 1.0);
 
-  return mix(backgroundColor, finalColor, mixA);
+  return mix(backgroundColor, outColor, mixA);
 }
 
-// Optional: debug normals overlay
+// Optional: Normalen-Debug
 vec4 debugNormals(vec4 originalColor, vec3 normal, bool enableDebug) {
   if (enableDebug) {
     vec3 normalColor = (normal + 1.0) * 0.5;

@@ -12,50 +12,29 @@ import 'package:meta/meta.dart';
 
 /// A liquid glass shape.
 ///
-/// This can either be used on its own, or be part of a shared
-/// [LiquidGlassLayer], where all shapes will blend together.
-///
-/// The simplest use of this widget is to create a [LiquidGlass] on its own
-/// layer:
-///
-/// ```dart
-/// Widget build(BuildContext context) {
-///   return LiquidGlass(
-///     shape: LiquidGlassSquircle(
-///       borderRadius: Radius.circular(10),
-///     ),
-///     child: FlutterLogo(),
-///   );
-/// }
-/// ```
-///
-/// If you want multiple shapes to blend together, you need to construct your
-/// own [LiquidGlassLayer], and place this widget inside of there using the
-/// [LiquidGlass.inLayer] constructor.
-///
-/// See the [LiquidGlassLayer] documentation for more information.
+/// Kann alleine genutzt werden (eigener Layer) oder als Teil eines
+/// gemeinsamen [LiquidGlassLayer] (`LiquidGlass.inLayer`).
 class LiquidGlass extends StatelessWidget {
-  /// Creates a new [LiquidGlass] on its own layer with the given [child],
-  /// [shape], and [settings].
+  /// Standalone-Variante: erstellt einen eigenen [LiquidGlassLayer].
   ///
-  /// This shape will not blend together with other shapes, so
-  /// [LiquidGlassSettings.blend] will be ignored.
+  /// [touches] werden dabei direkt an den Layer weitergereicht, damit
+  /// Glow/Hotspots funktionieren. In dieser Variante hat [blend] keine Wirkung
+  /// auf andere Shapes, da kein Sharing stattfindet.
   const LiquidGlass({
     required this.child,
     required this.shape,
     this.glassContainsChild = true,
     this.clipBehavior = Clip.hardEdge,
     this.restrictThickness = true,
+    this.touches = const <TouchPoint>[],
     super.key,
     LiquidGlassSettings settings = const LiquidGlassSettings(),
   }) : _settings = settings;
 
-  /// Creates a new [LiquidGlass] on a shared layer with the given [child] and
-  /// [shape].
+  /// In-Layer-Variante: erwartet bereits einen übergeordneten [LiquidGlassLayer].
   ///
-  /// This widget will assume that it is a child of a [LiquidGlassLayer], from
-  /// where it will take the [LiquidGlassSettings].
-  /// It will also blend together with other shapes in that layer.
+  /// Die [touches] werden hier NICHT gebraucht – sie gehören auf
+  /// den gemeinsamen Layer.
   const LiquidGlass.inLayer({
     required this.child,
     required this.shape,
@@ -63,32 +42,26 @@ class LiquidGlass extends StatelessWidget {
     this.glassContainsChild = true,
     this.clipBehavior = Clip.hardEdge,
   })  : _settings = null,
-        restrictThickness = false;
+        restrictThickness = false,
+        touches = const <TouchPoint>[];
 
   /// The child of this widget.
-  ///
-  /// You can choose whether this should be rendered "inside" of the glass, or
-  /// on top using [glassContainsChild].
   final Widget child;
 
   /// The shape of this glass.
-  ///
-  /// This is the shape of the glass that will be rendered.
   final LiquidShape shape;
 
-  /// Whether this glass should be rendered "inside" of the glass, or on top.
-  ///
-  /// If it is rendered inside, the color tint
-  /// of the glass will affect the child, and it will also be refracted.
+  /// Whether this glass should be rendered inside the glass or on top.
   final bool glassContainsChild;
 
   /// The clip behavior of this glass.
-  ///
-  /// Defaults to [Clip.none], so [child] will not be clipped.
   final Clip clipBehavior;
 
   /// {@macro liquid_glass_renderer.restrict_thickness}
   final bool restrictThickness;
+
+  /// Optional touch hotspots (nur in der Standalone-Variante relevant).
+  final List<TouchPoint> touches;
 
   final LiquidGlassSettings? _settings;
 
@@ -96,6 +69,7 @@ class LiquidGlass extends StatelessWidget {
   Widget build(BuildContext context) {
     switch (_settings) {
       case null:
+        // In-Layer: nur Rohform registrieren, Layer liefert Settings/Touch usw.
         return _RawLiquidGlass(
           shape: shape,
           glassContainsChild: glassContainsChild,
@@ -105,10 +79,13 @@ class LiquidGlass extends StatelessWidget {
             child: child,
           ),
         );
+
       case final settings:
+        // Standalone: eigener Layer + Touches durchreichen
         return LiquidGlassLayer(
           settings: settings,
           restrictThickness: restrictThickness,
+          touches: touches,
           child: _RawLiquidGlass(
             shape: shape,
             glassContainsChild: glassContainsChild,
@@ -131,7 +108,6 @@ class _RawLiquidGlass extends SingleChildRenderObjectWidget {
   });
 
   final LiquidShape shape;
-
   final bool glassContainsChild;
 
   @override
@@ -184,7 +160,6 @@ class RenderLiquidGlass extends RenderProxyBox {
   @override
   void attach(PipelineOwner owner) {
     super.attach(owner);
-    // Register with parent layer after attaching
     _registerWithParentLayer();
   }
 
@@ -195,7 +170,6 @@ class RenderLiquidGlass extends RenderProxyBox {
   }
 
   void _registerWithParentLayer() {
-    // Walk up the render tree to find the nearest RenderLiquidGlassLayer
     var ancestor = parent;
     while (ancestor != null) {
       if (ancestor is RenderLiquidGlassLayer) {
@@ -227,7 +201,6 @@ class RenderLiquidGlass extends RenderProxyBox {
   @override
   void performLayout() {
     super.performLayout();
-    // Notify parent layer when our layout changes
     _glassLink?.notifyShapeLayoutChanged(this);
   }
 
@@ -257,11 +230,4 @@ class RenderLiquidGlass extends RenderProxyBox {
       },
     );
   }
-
-  // @override
-  // void markNeedsPaint() {
-  //   super.markNeedsPaint();
-  //   // Also notify the parent layer
-  //   _glassLink?.markNeedsPaint();
-  // }
 }

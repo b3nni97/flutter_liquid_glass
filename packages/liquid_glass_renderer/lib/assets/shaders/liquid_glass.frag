@@ -30,7 +30,7 @@ layout(location = 10) uniform vec2 uRimParams;
 #define MAX_SHAPES 16
 layout(location = 11) uniform float uShapeData[MAX_SHAPES * 6];
 // Layout per shape: (type, centerX, centerY, sizeW, sizeH, cornerRadius)
-// Consumes 96 floats for 16 shapes → locations 10..105
+// Consumes 96 floats for 16 shapes → locations 11..106
 
 // ───────────────────── Blur uniforms (after uShapeData) ────────────────────
 // Next free location is 106
@@ -41,8 +41,30 @@ layout(location = 107) uniform vec4 uBlurHeader;
 #define u_sample_count (uBlurHeader.z)
 #define u_tile_mode    (uBlurHeader.w)
 
-// Samples start at 107 (50 * vec4 → locations 107..306)
+// Samples start at 108 (50 * vec4 → locations 108..307)
 layout(location = 108) uniform vec4 u_samples[50];
+
+// ───────────────────── Touch / Glow (after samples; fixed) ─────────────────
+#define MAX_TOUCHES 8
+// float-Count (wird zu int gecastet)
+layout(location = 308) uniform float uTouchCount_f;
+// uTouches[i] = (x_px, y_px, radius_px, fade_px)
+layout(location = 309) uniform vec4  uTouches[MAX_TOUCHES];
+
+// Glow: x=strength, y=power, z=tintMode(0=weiß,1=hintergrund,2=festeFarbe), w=insideOnly(0/1)
+layout(location = 317) uniform vec4 uGlowParams;
+// Optional (nur wenn tintMode==2) – A enthält hier die Tint-Intensität
+layout(location = 318) uniform vec4 uGlowColor;
+
+// ──────── NEU: Overrides aus GlowStyle (passen zu shared.glsl) ─────────────
+// (lightness, saturation, blurSigmaPx, mix)
+layout(location = 319) uniform vec4 uGlowOverrides;
+// (hasLightness, hasSaturation, hasBlur, hasGlassColor) → 0.0/1.0
+layout(location = 320) uniform vec4 uGlowFlags;
+// lokale Glasfarbe für den Glow-Bereich
+layout(location = 321) uniform vec4 uGlowGlass;
+// globaler Basis-Blur (Sigma, px) – wird für Delta-Blur in shared.glsl genutzt
+layout(location = 322) uniform float uGlobalBlurSigma;
 
 // ───────────────────── Textures / Output ───────────────────────────────────
 uniform sampler2D uBackgroundTexture;
@@ -65,7 +87,7 @@ float uNumShapes           = uColorAdjust.y;
 float rimWidthPx           = uRimParams.x;
 float rimSharpness         = uRimParams.y;
 
-// Include shared helpers after uniforms to ensure binding order is fixed.
+// ───────────────────── Include shared helpers *after* uniforms ─────────────
 #include "shared.glsl"
 
 // ============================================================================
@@ -276,8 +298,7 @@ vec3 getNormal(float sd, float thickness, int idx){
     return fastNormalize3(vec3(xy, n_sin));
   }
 
-  // Heuristic normal shaping: emphasize mid-height and side edges to
-  // enhance perceived curvature on certain shapes.
+  // Heuristic normal shaping: emphasize mid-height and side edges.
   float st, cr; vec2 c, sz;
   readShapeAt(idx, st, c, sz, cr);
 
@@ -297,8 +318,6 @@ vec3 getNormal(float sd, float thickness, int idx){
   return fastNormalize3(vec3(xy, n_sin));
 }
 
-// #define DEBUG_UNIFORMS 0
-
 void main(){
   vec2 pScreen = FlutterFragCoord().xy + vec2(0.5);
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
@@ -313,18 +332,6 @@ void main(){
   vec4 transformedCoord = uTransform * vec4(pScreen, 0.0, 1.0);
   vec2 p = transformedCoord.xy;
 
-#if 0 // DEBUG_UNIFORMS
-  if (uSize.x < 1.0 || uSize.y < 1.0) {
-    fragColor = vec4(1.0, 1.0, 0.0, 1.0); return;
-  }
-  if (uNumShapes < 0.5) {
-    fragColor = vec4(1.0, 0.0, 1.0, 1.0); return;
-  }
-  if (u_sample_count < 1.0) {
-    fragColor = vec4(0.0, 1.0, 1.0, 1.0); return;
-  }
-#endif
-
   int   idx;
   float sd  = sceneSDF_withIndex_fast(p, idx);
 
@@ -337,7 +344,7 @@ void main(){
 
   vec3 normal = getNormal(sd, uThickness, idx);
 
-  // Final shaded/refraction color.
+  // Final shaded/refraction color – volle Logik (inkl. Glow/Overrides) liegt in shared.glsl
   fragColor = renderLiquidGlass(
       screenUV, p, uSize,
       sd, uThickness,

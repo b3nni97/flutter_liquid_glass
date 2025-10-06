@@ -1,11 +1,97 @@
-import 'dart:math';
+// liquid_glass_settings.dart
+import 'dart:math' show pi;
 import 'dart:ui';
 
 import 'package:equatable/equatable.dart';
 
-/// Represents the settings for a liquid glass effect.
+/// Glow-Stil für Hotspot-/Touch-Zonen.
+/// - `enabled`: schaltet Glow/Overrides an.
+/// - `mix`: 0..1, maximale Stärke der Overrides (am Maskenzentrum).
+/// - Optional-Overrides (absolute Zielwerte): wenn `null`, bleibt Basiswert unverändert.
+/// - Glow-Parameter: strength/power/tintMode/insideOnly/color.
+class GlowStyle with EquatableMixin {
+  const GlowStyle({
+    this.enabled = false,
+    this.mix = 1.0, // max. Blend am Maskenzentrum
+
+    // Visuelle Overrides (optional; absolute Zielwerte)
+    this.lightness, // null => unverändert
+    this.saturation, // null => unverändert
+    this.blur, // null => unverändert (Sigma px)
+    this.glassColor, // null => unverändert
+
+    // Glow-spezifische Parameter
+    this.strength = 0.0,
+    this.power = 2.0,
+    this.tintMode = 1, // 0=weiß, 1=Hintergrund-Tint, 2=feste Farbe
+    this.insideOnly = true,
+    this.color = const Color(0xFFFFFFFF),
+  });
+
+  // Overlay-Anteil
+  final bool enabled;
+  final double mix;
+  final double? lightness;
+  final double? saturation;
+  final double? blur;
+  final Color? glassColor;
+
+  // Glow-Anteil
+  final double strength;
+  final double power;
+  final int tintMode;
+  final bool insideOnly;
+  final Color color;
+
+  GlowStyle copyWith({
+    bool? enabled,
+    double? mix,
+    double? lightness,
+    double? saturation,
+    double? blur,
+    Color? glassColor,
+    double? strength,
+    double? power,
+    int? tintMode,
+    bool? insideOnly,
+    Color? color,
+  }) {
+    return GlowStyle(
+      enabled: enabled ?? this.enabled,
+      mix: mix ?? this.mix,
+      lightness: lightness ?? this.lightness,
+      saturation: saturation ?? this.saturation,
+      blur: blur ?? this.blur,
+      glassColor: glassColor ?? this.glassColor,
+      strength: strength ?? this.strength,
+      power: power ?? this.power,
+      tintMode: tintMode ?? this.tintMode,
+      insideOnly: insideOnly ?? this.insideOnly,
+      color: color ?? this.color,
+    );
+  }
+
+  @override
+  List<Object?> get props => [
+        enabled,
+        mix,
+        lightness,
+        saturation,
+        blur,
+        glassColor,
+        strength,
+        power,
+        tintMode,
+        insideOnly,
+        color,
+      ];
+}
+
+/// Globale Einstellungen für den Liquid-Glass-Effekt.
+/// - Basiswerte definieren den Default-Look.
+/// - `glow` steuert sowohl Glow als auch optionale per-Bereich-Overrides.
 class LiquidGlassSettings with EquatableMixin {
-  /// Creates a new [LiquidGlassSettings] with the given settings.
+  /// Standard-Konstruktor.
   const LiquidGlassSettings({
     this.glassColor = const Color.fromARGB(0, 255, 255, 255),
     this.thickness = 20,
@@ -20,24 +106,26 @@ class LiquidGlassSettings with EquatableMixin {
     this.lightness = 1.0,
     this.rimWidthPx = 1.5,
     this.rimSharpness = 0.9,
+
+    // Einzige dynamische Overlay-/Hotspot-Option:
+    this.glow = const GlowStyle(),
   });
 
-  /// Creates a new [LiquidGlassSettings] with the given settings where each
-  /// setting works like it does in Figma, i.e. percentages from 0 to 100.
-  ///
-  /// This is just a convenience constructor; it maps familiar UI values to
-  /// physically-based parameters.
+  /// Convenience-Konstruktor im Figma-Stil (0..100 Skalen).
   LiquidGlassSettings.figma({
     required double refraction, // 0..100
-    required double depth, // interpretiert als thickness
+    required double depth, // => thickness
     required double dispersion, // 0..100
-    required double frost, // interpretiert als blur
+    required double frost, // => blur (Sigma)
     double lightIntensity = 50, // 0..100
     double lightAngle = 0.5 * pi,
     double blend = 20,
     Color glassColor = const Color.fromARGB(0, 255, 255, 255),
     double rimWidthPx = 1.5,
     double rimSharpness = 0.89,
+
+    // Optional direkt ein GlowStyle setzen
+    GlowStyle glow = const GlowStyle(),
   }) : this(
           refractiveIndex: 1 + (refraction / 100) * 0.2,
           thickness: depth,
@@ -52,83 +140,55 @@ class LiquidGlassSettings with EquatableMixin {
           glassColor: glassColor,
           rimWidthPx: rimWidthPx,
           rimSharpness: rimSharpness,
+          glow: glow,
         );
 
-  /// The color tint of the glass effect.
-  ///
-  /// Opacity defines the intensity of the tint.
+  // ───────── Basis-/Default-Parameter (global) ─────────
+
+  /// Basis-Tint (Alpha = Intensität).
   final Color glassColor;
 
-  /// The thickness of the glass surface.
-  ///
-  /// Thicker surfaces refract the light more intensely.
+  /// Dicke der „Flüssigkeit“ (px); beeinflusst Refraction.
   final double thickness;
 
-  /// The blur of the glass effect.
-  ///
-  /// Higher values create a more frosted appearance.
-  ///
-  /// Defaults to 0.
+  /// Basis-Blur (Sigma, px) für Frosting.
   final double blur;
 
-  /// The chromatic aberration of the glass effect (WIP).
-  ///
-  /// This is a little ugly still.
-  ///
-  /// Higher values create more pronounced color fringes.
+  /// Chromatische Aberration (0..~).
   final double chromaticAberration;
 
-  /// How strongly the shapes in this layer will blend together.
+  /// Smooth-Union-Blend (zusätzlicher „Zusammenlauf“ px).
   final double blend;
 
-  /// The angle of the light source in radians.
-  ///
-  /// This determines where the highlights on shapes will come from.
+  /// Lichtrichtung (Radiant).
   final double lightAngle;
 
-  /// The intensity of the light source.
-  ///
-  /// Higher values create more pronounced highlights.
+  /// Lichtintensität (0..1).
   final double lightIntensity;
 
-  /// The strength of the ambient light.
-  ///
-  /// Higher values create more pronounced ambient light.
+  /// Ambient-Anteil (0..1).
   final double ambientStrength;
 
-  /// The strength of the refraction.
-  ///
-  /// Higher values create more pronounced refraction.
-  /// Defaults to 1.51
+  /// Refractive Index (z. B. 1.51).
   final double refractiveIndex;
 
-  /// The saturation adjustment for pixels that shine through the glass.
-  ///
-  /// 1.0 means no change, values < 1.0 desaturate the background,
-  /// values > 1.0 increase saturation.
-  /// Defaults to 1.0
+  /// Sättigung für den Hintergrund hinter Glas.
   final double saturation;
 
-  /// The lightness adjustment for pixels that shine through the glass.
-  ///
-  /// 1.0 means no change, values < 1.0 darken the background,
-  /// values > 1.0 brighten the background.
-  /// Defaults to 1.0
+  /// Helligkeit für den Hintergrund hinter Glas.
   final double lightness;
 
-  /// Width of the highlight rim in **pixels** along the SDF edge.
-  ///
-  /// Larger values produce a visibly **thicker** rim (z. B. 2–3 px).
-  /// Default is 1.5.
+  /// Breite des Rim-Highlights (px entlang SDF).
   final double rimWidthPx;
 
-  /// Sharpness (falloff) of the rim highlight.
-  ///
-  /// Higher values make the rim **harder/schmaler**, lower values weicher/breiter.
-  /// Default is 0.9.
+  /// Rim-Schärfe (Falloff).
   final double rimSharpness;
 
-  /// Creates a new [LiquidGlassSettings] with the given settings.
+  /// Einziger dynamischer Overlay-/Hotspot-Stil (Glow + optionale Overrides).
+  final GlowStyle glow;
+
+  // ───────── Copy & Equatable ─────────
+
   LiquidGlassSettings copyWith({
     Color? glassColor,
     double? thickness,
@@ -143,22 +203,25 @@ class LiquidGlassSettings with EquatableMixin {
     double? lightness,
     double? rimWidthPx,
     double? rimSharpness,
-  }) =>
-      LiquidGlassSettings(
-        glassColor: glassColor ?? this.glassColor,
-        thickness: thickness ?? this.thickness,
-        blur: blur ?? this.blur,
-        chromaticAberration: chromaticAberration ?? this.chromaticAberration,
-        blend: blend ?? this.blend,
-        lightAngle: lightAngle ?? this.lightAngle,
-        lightIntensity: lightIntensity ?? this.lightIntensity,
-        ambientStrength: ambientStrength ?? this.ambientStrength,
-        refractiveIndex: refractiveIndex ?? this.refractiveIndex,
-        saturation: saturation ?? this.saturation,
-        lightness: lightness ?? this.lightness,
-        rimWidthPx: rimWidthPx ?? this.rimWidthPx,
-        rimSharpness: rimSharpness ?? this.rimSharpness,
-      );
+    GlowStyle? glow,
+  }) {
+    return LiquidGlassSettings(
+      glassColor: glassColor ?? this.glassColor,
+      thickness: thickness ?? this.thickness,
+      blur: blur ?? this.blur,
+      chromaticAberration: chromaticAberration ?? this.chromaticAberration,
+      blend: blend ?? this.blend,
+      lightAngle: lightAngle ?? this.lightAngle,
+      lightIntensity: lightIntensity ?? this.lightIntensity,
+      ambientStrength: ambientStrength ?? this.ambientStrength,
+      refractiveIndex: refractiveIndex ?? this.refractiveIndex,
+      saturation: saturation ?? this.saturation,
+      lightness: lightness ?? this.lightness,
+      rimWidthPx: rimWidthPx ?? this.rimWidthPx,
+      rimSharpness: rimSharpness ?? this.rimSharpness,
+      glow: glow ?? this.glow,
+    );
+  }
 
   @override
   List<Object?> get props => [
@@ -175,5 +238,6 @@ class LiquidGlassSettings with EquatableMixin {
         lightness,
         rimWidthPx,
         rimSharpness,
+        glow,
       ];
 }

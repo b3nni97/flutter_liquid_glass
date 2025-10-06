@@ -16,24 +16,15 @@ import 'package:meta/meta.dart';
 /// A compositing layer that renders multiple [LiquidGlass] shapes which can
 /// visually merge and share a single [LiquidGlassSettings] configuration.
 ///
-/// This widget is purely a rendering utility. It does not alter the semantics
-/// or layout of its [child]. The [child] is still laid out and painted by the
-/// regular Flutter pipeline; this layer only controls how the glass is
-/// filtered and composited on top of/under that content.
-///
 /// Notes:
 /// - Requires Impeller (runtime shader + backdrop filter support). If runtime
-///   shader filters are not supported, this widget becomes a no-op pass-through
-///   and renders [child] directly.
-/// - The layer collects all participating [LiquidGlass] render objects via a
-///   shared [GlassLink] and renders them using a two-pass, separable blur:
-///   horizontal blur in a dedicated shader, then vertical blur and glass in
-///   the main fragment shader.
+///   shader filters are not supported, this widget becomes a no-op pass-through.
 class LiquidGlassLayer extends StatefulWidget {
   const LiquidGlassLayer({
     required this.child,
     this.settings = const LiquidGlassSettings(),
     this.restrictThickness = true,
+    this.touches = const <TouchPoint>[],
     super.key,
   });
 
@@ -47,15 +38,26 @@ class LiquidGlassLayer extends StatefulWidget {
   /// the smallest shape in the layer to avoid artifacts on very thin shapes.
   final bool restrictThickness;
 
+  /// Optional list of touch hotspots (logical px); used by the shader to glow.
+  final List<TouchPoint> touches;
+
   @override
   State<LiquidGlassLayer> createState() => _LiquidGlassLayerState();
+}
+
+// DTO for touch points in logical pixels (will be scaled by DPR before upload)
+@immutable
+class TouchPoint {
+  const TouchPoint(this.position, {this.radiusPx = 60, this.fadePx = 40});
+  final Offset position; // logical pixels
+  final double radiusPx; // logical px
+  final double fadePx; // logical px
 }
 
 class _LiquidGlassLayerState extends State<LiquidGlassLayer>
     with SingleTickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
-    // Guard against platforms/backends without shader-filter support.
     if (!ImageFilter.isShaderFilterSupported) {
       assert(
         ImageFilter.isShaderFilterSupported,
@@ -79,6 +81,7 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer>
           settings: widget.settings,
           debugRenderRefractionMap: false,
           restrictThickness: widget.restrictThickness,
+          touches: widget.touches,
           child: child!,
         ),
         child: child,
@@ -95,23 +98,18 @@ class _RawShapes extends SingleChildRenderObjectWidget {
     required this.settings,
     required this.debugRenderRefractionMap,
     required this.restrictThickness,
+    required this.touches,
     required Widget super.child,
   });
 
-  /// Main glass fragment shader (includes vertical blur + refraction).
-  final FragmentShader shader;
+  final FragmentShader shader; // Main glass shader (includes V-pass)
+  final FragmentShader blurH; // Horizontal blur shader (H-pass)
 
-  /// Horizontal blur fragment shader (separable blur first pass).
-  final FragmentShader blurH;
-
-  /// Shared settings that affect all shapes in this layer.
   final LiquidGlassSettings settings;
-
-  /// When true, paints a debug refraction map instead of the glass effect.
   final bool debugRenderRefractionMap;
-
-  /// See [LiquidGlassLayer.restrictThickness].
   final bool restrictThickness;
+
+  final List<TouchPoint> touches;
 
   @override
   RenderObject createRenderObject(BuildContext context) {
@@ -122,6 +120,7 @@ class _RawShapes extends SingleChildRenderObjectWidget {
       settings: settings,
       debugRenderRefractionMap: debugRenderRefractionMap,
       restrictThickness: restrictThickness,
+      touches: touches,
     );
   }
 
@@ -135,7 +134,8 @@ class _RawShapes extends SingleChildRenderObjectWidget {
       ..settings = settings
       ..debugRenderRefractionMap = debugRenderRefractionMap
       ..restrictThickness = restrictThickness
-      ..setShaders(shader, blurH);
+      ..setShaders(shader, blurH)
+      ..touches = touches;
   }
 }
 
@@ -164,12 +164,14 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     required LiquidGlassSettings settings,
     required bool restrictThickness,
     bool debugRenderRefractionMap = false,
+    List<TouchPoint> touches = const [],
   })  : _devicePixelRatio = devicePixelRatio,
         _shader = shader,
         _blurH = blurH,
         _settings = settings,
         _debugRenderRefractionMap = debugRenderRefractionMap,
         _restrictThickness = restrictThickness,
+        _touches = List<TouchPoint>.from(touches),
         _glassLink = GlassLink() {
     _glassLink.addListener(_onGlassLinkChanged);
     _initHBlurInvariants();
@@ -183,9 +185,18 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   // 14..15   : uColorAdjust (vec2) => [14]=lightness, [15]=numShapes
   // 16..17   : uLightDirection (vec2) => cos,sin
   // 18..33   : uTransform (mat4)
-  // 34..129  : uShapeData (float[MAX_SHAPES*6])
-  // 130..133 : uBlurHeader (vec4) => dir.x, dir.y, sample_count, tile_mode
-  // 134..    : u_samples[0].. (vec4 per sample)
+  // 34..35   : uRimParams (vec2)
+  // 36..131  : uShapeData (float[MAX_SHAPES*6])
+  // 132..135 : uBlurHeader (vec4) => dir.x, dir.y, sample_count, tile_mode
+  // 136..335 : u_samples[0..49] (vec4 per sample → 50 * 4 = 200 floats)
+  // 336      : uTouchCount_f (float)
+  // 337..368 : uTouches[8] (8 * vec4)
+  // 369..372 : uGlowParams (vec4)
+  // 373..376 : uGlowColor  (vec4)
+  // 377..380 : uGlowOverrides (vec4: lightness, saturation, blurSigmaPx, mix)
+  // 381..384 : uGlowFlags    (vec4: hasLightness, hasSaturation, hasBlur, hasGlassColor)
+  // 385..388 : uGlowGlass    (vec4: RGBA 0..1)
+  // 389      : uGlobalBlurSigma (float)
   static const int _idxGlassColor = 2;
   static const int _idxOpticalProps = 6;
   static const int _idxLightConfig = 10;
@@ -197,6 +208,16 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _shapeDataBaseFloat = 36; // first float of uShapeData
   static const int _blurBaseFloat = 132; // uBlurHeader.x (u_dir_x)
   static const int _blurSamplesFloat = 136; // u_samples[0].x
+
+  // Touch/Glow indices (match liquid_glass.frag layout)
+  static const int _idxTouchCount = 336;
+  static const int _idxTouches = 337; // 8 * vec4 → 32 floats
+  static const int _idxGlowParams = 369; // vec4
+  static const int _idxGlowColor = 373; // vec4
+  static const int _idxGlowOverrides = 377; // vec4
+  static const int _idxGlowFlags = 381; // vec4
+  static const int _idxGlowGlass = 385; // vec4
+  static const int _idxGlobalBlurSigma = 389; // float
 
   static const double _eps = 0.01;
 
@@ -211,25 +232,10 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   bool _debugRenderRefractionMap;
   bool _restrictThickness;
 
-  // Cached kernels and state to minimize uniform uploads.
-  List<_PackedS>? _cachedKernel;
-  int _cachedSigmaBucketKernel = -1;
-  int _lastKernelCountH = -1;
-  int _lastKernelCountV = -1;
-  int _lastShapeCount = -1;
-  LiquidGlassSettings? _lastSettings;
-  List<RawShape>? _lastShapes;
+  // Dynamic input
+  List<TouchPoint> _touches;
 
-  bool _hInvariantsInitialized = false;
-
-  // BackdropFilter layer handles (one per pass) to enable retained rendering.
-  final LayerHandle<BackdropFilterLayer> _hHandle =
-      LayerHandle<BackdropFilterLayer>();
-  final LayerHandle<BackdropFilterLayer> _vHandle =
-      LayerHandle<BackdropFilterLayer>();
-
-  // —————— Mutators that trigger repaints when state changes ——————
-
+  // Mutators
   set devicePixelRatio(double value) {
     if (_devicePixelRatio == value) return;
     _devicePixelRatio = value;
@@ -254,6 +260,28 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     markNeedsPaint();
   }
 
+  set touches(List<TouchPoint> v) {
+    _touches = List<TouchPoint>.from(v);
+    markNeedsPaint();
+  }
+
+  // Cached kernels and state to minimize uniform uploads.
+  List<_PackedS>? _cachedKernel;
+  int _cachedSigmaBucketKernel = -1;
+  int _lastKernelCountH = -1;
+  int _lastKernelCountV = -1;
+  int _lastShapeCount = -1;
+  LiquidGlassSettings? _lastSettings;
+  List<RawShape>? _lastShapes;
+
+  bool _hInvariantsInitialized = false;
+
+  // BackdropFilter layer handles (one per pass) to enable retained rendering.
+  final LayerHandle<BackdropFilterLayer> _hHandle =
+      LayerHandle<BackdropFilterLayer>();
+  final LayerHandle<BackdropFilterLayer> _vHandle =
+      LayerHandle<BackdropFilterLayer>();
+
   /// Swap shaders. This also resets kernel-related caches as necessary.
   void setShaders(FragmentShader glass, FragmentShader blurH) {
     if (!identical(_shader, glass)) {
@@ -271,8 +299,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     }
   }
 
-  /// Set invariants for the horizontal blur shader. Only done once per shader
-  /// instance to avoid redundant uniform writes.
+  /// Set invariants for the horizontal blur shader. Only done once per shader.
   void _initHBlurInvariants() {
     if (_hInvariantsInitialized) return;
     _blurH
@@ -282,11 +309,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _hInvariantsInitialized = true;
   }
 
-  /// Collects all [RawShape]s participating in this layer, paired with their
-  /// [RenderLiquidGlass] owners for transform and painting coordination.
-  ///
-  /// Throws [UnsupportedError] if more than [_maxShapesPerLayer] shapes are
-  /// present to keep uniform buffer usage bounded.
+  /// Collects all [RawShape]s participating in this layer.
   List<(RenderLiquidGlass, RawShape)> collectShapes() {
     final result = <(RenderLiquidGlass, RawShape)>[];
     final computed = _glassLink.computedShapes;
@@ -314,8 +337,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   }
 
   /// Extracts a uniform scale factor from the given transform matrix.
-  /// Handles axis-aligned and rotated cases by deriving the geometric mean
-  /// of the X/Y scales, which is suitable for isotropic blur parameters.
   double _getScaleFromTransform(Matrix4 transform) {
     final m = transform.storage;
     // Fast-path: no rotation/skew.
@@ -324,7 +345,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       final sy = m[5].abs();
       return math.sqrt(sx * sy);
     }
-    // General case: derive magnitudes from column vectors.
+    // General case.
     final a = m[0], b = m[1], c = m[4], d = m[5];
     final scaleXSq = a * a + b * b;
     final scaleYSq = c * c + d * d;
@@ -336,25 +357,20 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const double _maxSigma = 500.0;
   static const double _sqrt3 = 1.7320508075688772;
 
-  /// Empirical sigma scaling to better match Impeller blur response.
   double _scaleSigma(double s) {
     final ss = s.clamp(0.0, _maxSigma);
     const a = 3.4e-06, b = -3.4e-3, c = 1.0;
     return ss * (c + b * ss + a * ss * ss);
   }
 
-  /// Converts a Gaussian sigma to an effective radius approximation.
   double _sigmaToRadius(double sigma) {
     return sigma > 0.5 ? (sigma - 0.5) * _sqrt3 : 0.0;
   }
 
-  /// Generates a discrete Gaussian kernel centered around zero with the given
-  /// [radius] and [blurSigma]. The optional [step] enables sample decimation.
   List<_RawS> _genRaw(double blurSigma, int radius, {int step = 1}) {
     final out = <_RawS>[];
     int count = ((2 * radius) ~/ step) + 1, xOff = 0;
 
-    // Reduce very large kernels slightly to keep within GPU limits.
     if (radius >= 16) {
       count -= 2;
       xOff = 1;
@@ -377,9 +393,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     return out;
   }
 
-  /// Compacts the kernel using a linear interpolation trick to halve the
-  /// number of taps while preserving the first two moments as closely as
-  /// possible. Also enforces Impeller kernel size limits.
   List<_PackedS> _lerpHack(List<_RawS> raw) {
     final n = raw.length, outCount = ((n - 1) ~/ 2) + 1, mid = outCount ~/ 2;
     final out = <_PackedS>[];
@@ -403,7 +416,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
   int _sigmaBucket(double sigmaPx) => (sigmaPx * 10).round();
 
-  /// Computes (or fetches) the separable blur kernel for a given sigma in px.
   List<_PackedS> _computeImpellerKernel(double sigmaPx) {
     final scaled = _scaleSigma(sigmaPx);
     final r = _sigmaToRadius(scaled).round();
@@ -411,7 +423,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     return _lerpHack(_genRaw(scaled, r));
   }
 
-  /// Returns a cached kernel for the given sigma bucket and marks cache state.
   List<_PackedS> _getKernelAndMark(double sigmaPx) {
     final bucket = _sigmaBucket(sigmaPx);
     if (_cachedKernel != null && bucket == _cachedSigmaBucketKernel) {
@@ -431,10 +442,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _lastShapeCount = shapeCount;
   }
 
-  /// Lightweight shape change detection to avoid redundant uniform uploads.
   bool _shapesChanged(List<(RenderLiquidGlass, RawShape)> shapes) {
     final shapeList = shapes.map((e) => e.$2).toList(growable: false);
-
     if (_lastShapes == null || _lastShapes!.length != shapeList.length) {
       _lastShapes = shapeList;
       return true;
@@ -469,7 +478,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
         return true;
       }
     }
-
     return false;
   }
 
@@ -481,8 +489,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   ];
 
   /// Uploads all uniforms required for the current frame if settings, shapes,
-  /// or kernel configuration have changed. Minimizes driver traffic by
-  /// tracking previous values and only updating as needed.
+  /// or kernel configuration have changed.
   void _uploadUniformsIfNeeded(
     int shapeCount,
     List<(RenderLiquidGlass, RawShape)> shapes,
@@ -579,6 +586,80 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       }
       _lastKernelCountV = nKernel;
     }
+
+    // ───────────────────── Touches & Glow (from settings) ────────────────────
+    // Touch count (clamped to MAX_TOUCHES=8 in shader)
+    final int nTouches = _touches.length.clamp(0, 8);
+    _shader.setFloat(_idxTouchCount, nTouches.toDouble());
+    for (int i = 0; i < 8; i++) {
+      final base = _idxTouches + i * 4;
+      if (i < nTouches) {
+        final tp = _touches[i];
+        _shader
+          ..setFloat(base + 0, tp.position.dx * _devicePixelRatio)
+          ..setFloat(base + 1, tp.position.dy * _devicePixelRatio)
+          ..setFloat(base + 2, tp.radiusPx * _devicePixelRatio)
+          ..setFloat(base + 3, tp.fadePx * _devicePixelRatio);
+      } else {
+        _shader
+          ..setFloat(base + 0, -99999.0)
+          ..setFloat(base + 1, -99999.0)
+          ..setFloat(base + 2, 0.0)
+          ..setFloat(base + 3, 0.0);
+      }
+    }
+
+    // Glow (inkl. Overrides) aus settings.glow
+    final glow = _settings.glow;
+    final bool glowOn = glow.enabled;
+
+    // uGlowParams: x=strength, y=power, z=tintMode, w=insideOnly
+    _shader
+      ..setFloat(_idxGlowParams + 0, glowOn ? glow.strength : 0.0)
+      ..setFloat(_idxGlowParams + 1, glow.power)
+      ..setFloat(_idxGlowParams + 2, glow.tintMode.toDouble())
+      ..setFloat(_idxGlowParams + 3, glow.insideOnly ? 1.0 : 0.0);
+
+    // uGlowColor (RGBA 0..1) – A kann als Tint-Intensity genutzt werden
+    _shader
+      ..setFloat(_idxGlowColor + 0, glow.color.red / 255.0)
+      ..setFloat(_idxGlowColor + 1, glow.color.green / 255.0)
+      ..setFloat(_idxGlowColor + 2, glow.color.blue / 255.0)
+      ..setFloat(_idxGlowColor + 3, glow.color.alpha / 255.0);
+
+    // uGlowOverrides: (lightness, saturation, blurSigmaPx, mix)
+    final double mix = glowOn ? glow.mix : 0.0;
+    final double targetLightness = glow.lightness ?? _settings.lightness;
+    final double targetSaturation = glow.saturation ?? _settings.saturation;
+    final double targetBlurSigmaPx =
+        (glow.blur ?? _settings.blur) * _devicePixelRatio;
+    _shader
+      ..setFloat(_idxGlowOverrides + 0, targetLightness)
+      ..setFloat(_idxGlowOverrides + 1, targetSaturation)
+      ..setFloat(_idxGlowOverrides + 2, targetBlurSigmaPx)
+      ..setFloat(_idxGlowOverrides + 3, mix);
+
+    // uGlowFlags: (hasL, hasS, hasBlur, hasGlassColor) * enabled
+    double f(bool cond) => (glowOn && cond) ? 1.0 : 0.0;
+    _shader
+      ..setFloat(_idxGlowFlags + 0, f(glow.lightness != null))
+      ..setFloat(_idxGlowFlags + 1, f(glow.saturation != null))
+      ..setFloat(_idxGlowFlags + 2, f(glow.blur != null))
+      ..setFloat(_idxGlowFlags + 3, f(glow.glassColor != null));
+
+    // uGlowGlass RGBA (0..1) – nur relevant wenn Flag[3] == 1
+    final Color gg = glow.glassColor ?? const Color(0x00000000);
+    _shader
+      ..setFloat(_idxGlowGlass + 0, gg.red / 255.0)
+      ..setFloat(_idxGlowGlass + 1, gg.green / 255.0)
+      ..setFloat(_idxGlowGlass + 2, gg.blue / 255.0)
+      ..setFloat(_idxGlowGlass + 3, gg.alpha / 255.0);
+
+    // uGlobalBlurSigma = globales Sigma in Gerätepixeln (für Delta-Blur)
+    _shader.setFloat(
+      _idxGlobalBlurSigma,
+      _settings.blur * _devicePixelRatio,
+    );
   }
 
   /// Snap a rectangle to device pixels to avoid half-pixel sampling seams.
@@ -614,8 +695,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     return path;
   }
 
-  /// Computes a union rectangle of all shapes, inflated by a margin that
-  /// accounts for blur sampling radius and glass thickness.
+  /// Computes a union rectangle of all shapes, inflated by a margin for blur.
   Rect _computeUnionClipRect(List<(RenderLiquidGlass, RawShape)> shapes) {
     Rect? union;
     for (final (ro, _) in shapes) {
@@ -645,7 +725,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
     final shapeCount = math.min(_maxShapesPerLayer, shapes.length);
 
-    // Kernel generation.
+    // Kernel generation for the separable blur.
     final double sigmaPx = _settings.blur * _devicePixelRatio;
     final List<_PackedS> kernel = _getKernelAndMark(sigmaPx);
     final int nKernel = math.min(_impellerMaxKernel, kernel.length);
@@ -700,7 +780,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
               hLayer..filter = ImageFilter.shader(_blurH);
 
               ctx.pushLayer(hLayer, (c2, o2) {
-                // Draw a tiny rect to trigger the backdrop filter sampling.
                 final paint = Paint()..color = const Color(0x01000000);
                 c2.canvas.drawRect(bounds.shift(-off), paint);
               }, off);
@@ -737,13 +816,11 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
             vLayer..filter = ImageFilter.shader(_shader);
 
             ctx.pushLayer(vLayer, (c2, o2) {
-              // Draw a tiny rect to trigger the backdrop filter sampling.
               final paint = Paint()..color = const Color(0x01000000);
               c2.canvas.drawRect(bounds.shift(-off), paint);
             }, off);
             _vHandle.layer = vLayer;
           },
-          // Matches the behavior of the working reference implementation.
           clipBehavior: Clip.hardEdge,
         );
       },
@@ -765,9 +842,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   }
 
   /// Paints either the child content that is inside the glass or the content
-  /// outside of it depending on [glassContainsChild]. This preserves z-ordering
-  /// relative to the glass effect while delegating actual painting to the
-  /// participating [RenderLiquidGlass] instances.
+  /// outside of it depending on [glassContainsChild].
   void _paintShapeContents(
     PaintingContext context,
     Offset offset,
@@ -776,7 +851,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   }) {
     for (final (ro, _) in shapes) {
       if (ro.glassContainsChild == glassContainsChild) {
-        // Paint using the child’s local transform relative to this layer.
         final Matrix4 transform = ro.getTransformTo(this);
         context.pushTransform(true, offset, transform, ro.paintFromLayer);
       }
