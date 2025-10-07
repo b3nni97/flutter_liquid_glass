@@ -36,15 +36,16 @@
 // Base blur kernel header/taps, size, etc. exist in deinem Hauptshader.
 // Wir listen hier nur Glow-spezifische Inputs, die diese Datei nutzt:
 //
-// uniform float uTouchCount_f;   // 0..8
-// uniform vec4  uTouches[8];     // (x_px, y_px, radius_px, fade_px)
-// uniform vec4  uGlowParams;     // (strength, power, tintMode, insideOnly)
-// uniform vec4  uGlowColor;      // (r, g, b, a)  -> a = Tint-Intensität
+// uniform float uTouchCount_f;         // 0..8
+// uniform vec4  uTouches[8];           // (x_px, y_px, radius_px, fade_px)
+// uniform float uTouchGlowStrengths[8];// NEU: per-touch Glow-Multiplikator (0..1)
+// uniform vec4  uGlowParams;           // (strength, power, tintMode, insideOnly)
+// uniform vec4  uGlowColor;            // (r, g, b, a)  -> a = Tint-Intensität
 //
 // NEU (für GlowStyle-Overrides):
-// uniform vec4  uGlowOverrides;  // (lightness, saturation, blurSigmaPx, mix)
-// uniform vec4  uGlowFlags;      // (hasLightness, hasSaturation, hasBlur, hasGlassColor)
-// uniform vec4  uGlowGlass;      // (glass_r, glass_g, glass_b, glass_a)
+// uniform vec4  uGlowOverrides;        // (lightness, saturation, blurSigmaPx, mix)
+// uniform vec4  uGlowFlags;            // (hasLightness, hasSaturation, hasBlur, hasGlassColor)
+// uniform vec4  uGlowGlass;            // (glass_r, glass_g, glass_b, glass_a)
 
 // ---------- Small utilities ----------
 float hash12(vec2 p){
@@ -379,6 +380,11 @@ float glowTouchMask(vec2 pPx, float insideOnly, float sd){
     float inner = tp.z;
     float outer = tp.z + max(tp.w, 1e-3);
     float mi = smoothstep(outer, inner, d);
+
+    // NEU: pro-Touch Glow-Multiplikator (0..1)
+    float s = clamp(uTouchGlowStrengths[i], 0.0, 1.0);
+    mi *= s;
+
     m = max(m, mi);
   }
   return m * inMask;

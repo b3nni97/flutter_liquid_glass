@@ -48,10 +48,17 @@ class LiquidGlassLayer extends StatefulWidget {
 // DTO for touch points in logical pixels (will be scaled by DPR before upload)
 @immutable
 class TouchPoint {
-  const TouchPoint(this.position, {this.radiusPx = 60, this.fadePx = 40});
+  const TouchPoint(
+    this.position, {
+    this.radiusPx = 60,
+    this.fadePx = 40,
+    this.glowStrength = 1.0, // <- NEU: 0..1 Multiplier pro Touch
+  });
+
   final Offset position; // logical pixels
   final double radiusPx; // logical px
   final double fadePx; // logical px
+  final double glowStrength; // 0..1, wird separat an den Shader übertragen
 }
 
 class _LiquidGlassLayerState extends State<LiquidGlassLayer>
@@ -218,6 +225,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _idxGlowFlags = 381; // vec4
   static const int _idxGlowGlass = 385; // vec4
   static const int _idxGlobalBlurSigma = 389; // float
+
+  // NEU: per-touch glowStrengths (8 floats) – schreibt ab der nächsten freien Slot-ID
+  static const int _idxTouchGlowStrengths = 390; // floats[8] → 390..397
 
   static const double _eps = 0.01;
 
@@ -607,6 +617,13 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
           ..setFloat(base + 2, 0.0)
           ..setFloat(base + 3, 0.0);
       }
+    }
+
+    // NEU: pro-touch Glow-Strength separat übertragen (Floats[8] ab _idxTouchGlowStrengths)
+    for (int i = 0; i < 8; i++) {
+      final double s =
+          (i < nTouches) ? _touches[i].glowStrength.clamp(0.0, 1.0) : 0.0;
+      _shader.setFloat(_idxTouchGlowStrengths + i, s);
     }
 
     // Glow (inkl. Overrides) aus settings.glow

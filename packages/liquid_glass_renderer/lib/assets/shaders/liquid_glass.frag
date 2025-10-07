@@ -66,6 +66,9 @@ layout(location = 321) uniform vec4 uGlowGlass;
 // globaler Basis-Blur (Sigma, px) – wird für Delta-Blur in shared.glsl genutzt
 layout(location = 322) uniform float uGlobalBlurSigma;
 
+// NEU: per-touch Glow-Multiplikatoren (0..1)
+layout(location = 323) uniform float uTouchGlowStrengths[MAX_TOUCHES];
+
 // ───────────────────── Textures / Output ───────────────────────────────────
 uniform sampler2D uBackgroundTexture;
 layout(location = 0) out vec4 fragColor;
