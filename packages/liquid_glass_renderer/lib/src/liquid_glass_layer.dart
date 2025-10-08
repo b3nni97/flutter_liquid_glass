@@ -186,18 +186,18 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   // 136..335 : u_samples[0..49] (vec4 per sample → 50 * 4 = 200 floats)
   // 336      : uTouchCount_f (float)
   // 337..368 : uTouches[8] (8 * vec4)
-  // 369..376 : uTouchOwners[8] (8 * float)  ← NEU direkt nach uTouches
+  // 369..376 : uTouchOwners[8] (8 * float)
   // 377..380 : uGlowParams (vec4)
   // 381..384 : uGlowColor  (vec4)
-  // 385..388 : uGlowOverrides (vec4: lightness, saturation, blurSigmaPx, mix)
-  // 389..392 : uGlowFlags    (vec4: hasLightness, hasSaturation, hasBlur, hasGlassColor)
-  // 393..396 : uGlowGlass    (vec4: RGBA 0..1)
+  // 385..388 : uGlowOverrides (vec4)
+  // 389..392 : uGlowFlags (vec4)
+  // 393..396 : uGlowGlass (vec4)
   // 397      : uGlobalBlurSigma (float)
   // 398..405 : uTouchGlowStrengths[8] (8 * float)
   static const int _idxGlassColor = 2;
   static const int _idxOpticalProps = 6;
   static const int _idxLightConfig = 10;
-  static const int _idxColorAdjust = 14; // x: lightness, y: numShapes (@+1)
+  static const int _idxColorAdjust = 14; // x: lightness, y: numShapes
   static const int _idxLightDir = 16;
   static const int _idxTransform = 18;
   static const int _idxRimParams = 34;
@@ -209,15 +209,14 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   // Touch/Glow indices (match liquid_glass.frag layout ordering)
   static const int _idxTouchCount = 336;
   static const int _idxTouches = 337; // 8 * vec4 → 32 floats
-  static const int _idxTouchOwners =
-      369; // 8 floats (NEU, direkt nach uTouches)
+  static const int _idxTouchOwners = 369;
   static const int _idxGlowParams = 377; // vec4
   static const int _idxGlowColor = 381; // vec4
   static const int _idxGlowOverrides = 385; // vec4
   static const int _idxGlowFlags = 389; // vec4
   static const int _idxGlowGlass = 393; // vec4
   static const int _idxGlobalBlurSigma = 397; // float
-  static const int _idxTouchGlowStrengths = 398; // floats[8] → 398..405
+  static const int _idxTouchGlowStrengths = 398; // floats[8]
 
   static const double _eps = 0.01;
 
@@ -232,7 +231,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   bool _debugRenderRefractionMap;
   bool _restrictThickness;
 
-  // --- Setters (wieder hinzugefügt) ---
+  // --- Setters ---
   set devicePixelRatio(double value) {
     if (_devicePixelRatio == value) return;
     _devicePixelRatio = value;
@@ -295,10 +294,11 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   /// Set invariants for the horizontal blur shader. Only done once per shader.
   void _initHBlurInvariants() {
     if (_hInvariantsInitialized) return;
+    // uBlurHeader: x=u_dir_x, y=u_dir_y, z=u_sample_count, w=u_tile_mode
     _blurH
-      ..setFloat(2, 1.0) // u_dir.x (H-pass shader)
-      ..setFloat(3, 0.0) // u_dir.y
-      ..setFloat(5, 0.0); // u_tile_mode (clamp)
+      ..setFloat(_blurBaseFloat + 0, 1.0) // dir.x (H-pass)
+      ..setFloat(_blurBaseFloat + 1, 0.0) // dir.y
+      ..setFloat(_blurBaseFloat + 3, 0.0); // tile_mode = clamp
     _hInvariantsInitialized = true;
   }
 
@@ -562,23 +562,52 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
           ..setFloat(base + 5, shape.cornerRadius * _devicePixelRatio);
       }
 
+      // ── Spiegel die relevanten Uniforms in den H-Pass ────────────────────
+      _blurH
+        ..setFloat(_idxOpticalProps + 0, _settings.refractiveIndex)
+        ..setFloat(_idxOpticalProps + 1, _settings.chromaticAberration)
+        ..setFloat(_idxOpticalProps + 2, thickness)
+        ..setFloat(_idxOpticalProps + 3, _settings.blend * _devicePixelRatio)
+        // WICHTIG: uColorAdjust.x = lightness, uColorAdjust.y = numShapes
+        ..setFloat(_idxColorAdjust + 0, _settings.lightness)
+        ..setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
+
+      for (int i = 0; i < 16; i++) {
+        _blurH.setFloat(_idxTransform + i, _identityMat4[i]);
+      }
+
+      for (var i = 0; i < shapeCount; i++) {
+        final shape = i < shapes.length ? shapes[i].$2 : RawShape.none;
+        final base = _shapeDataBaseFloat + (i * 6);
+        _blurH
+          ..setFloat(base + 0, shape.type.index.toDouble())
+          ..setFloat(base + 1, shape.center.dx * _devicePixelRatio)
+          ..setFloat(base + 2, shape.center.dy * _devicePixelRatio)
+          ..setFloat(base + 3, shape.size.width * _devicePixelRatio)
+          ..setFloat(base + 4, shape.size.height * _devicePixelRatio)
+          ..setFloat(base + 5, shape.cornerRadius * _devicePixelRatio);
+      }
+
       _lastShapeCount = shapeCount;
       _lastSettings = _settings;
     } else {
       _updateShapeCountIfNeeded(shapeCount);
+      // H-Pass: nur die Shape-Anzahl (uColorAdjust.y) updaten.
+      _blurH.setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
     }
 
     // Horizontal pass (separate shader).
-    _blurH.setFloat(4, nKernel.toDouble());
+    _blurH.setFloat(_blurBaseFloat + 2, nKernel.toDouble()); // sample_count
     if (nKernel != _lastKernelCountH) {
-      int base = 6;
+      int base = _blurSamplesFloat;
       for (int i = 0; i < nKernel; i++) {
         final s = kernel[i];
         _blurH
-          ..setFloat(base + i * 4 + 0, s.tPx)
-          ..setFloat(base + i * 4 + 1, 0.0)
-          ..setFloat(base + i * 4 + 2, s.w)
-          ..setFloat(base + i * 4 + 3, 0.0);
+          ..setFloat(base + 0, s.tPx)
+          ..setFloat(base + 1, 0.0)
+          ..setFloat(base + 2, s.w)
+          ..setFloat(base + 3, 0.0);
+        base += 4;
       }
       _lastKernelCountH = nKernel;
     }
@@ -587,8 +616,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _shader
       ..setFloat(_blurBaseFloat + 0, 0.0) // u_dir_x
       ..setFloat(_blurBaseFloat + 1, 1.0) // u_dir_y
-      ..setFloat(_blurBaseFloat + 2, nKernel.toDouble()) // u_sample_count
-      ..setFloat(_blurBaseFloat + 3, 0.0); // u_tile_mode = clamp
+      ..setFloat(_blurBaseFloat + 2, nKernel.toDouble())
+      ..setFloat(_blurBaseFloat + 3, 0.0); // clamp
 
     if (nKernel != _lastKernelCountV) {
       int baseV = _blurSamplesFloat;
@@ -605,7 +634,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     }
 
     // ───────────────────── Touches & Glow ────────────────────
-    // Kombinierte Touches (per Shape) + Owner-IDs setzen
     final int nTouches = ownedTouches.length.clamp(0, 8);
     _shader.setFloat(_idxTouchCount, nTouches.toDouble());
     for (int i = 0; i < 8; i++) {
@@ -626,39 +654,33 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       }
     }
 
-    // Owner-Indizes direkt nach uTouches
     for (int i = 0; i < 8; i++) {
       final double owner =
           (i < nTouches) ? ownedTouches[i].ownerIndex.toDouble() : -1.0;
       _shader.setFloat(_idxTouchOwners + i, owner);
     }
 
-    // Pro-touch Glow-Strengths
     for (int i = 0; i < 8; i++) {
       final double s =
           (i < nTouches) ? ownedTouches[i].glowStrength.clamp(0.0, 1.0) : 0.0;
       _shader.setFloat(_idxTouchGlowStrengths + i, s);
     }
 
-    // Glow (inkl. Overrides) aus settings.glow
     final glow = _settings.glow;
     final bool glowOn = glow.enabled;
 
-    // uGlowParams: x=strength, y=power, z=tintMode, w=insideOnly
     _shader
       ..setFloat(_idxGlowParams + 0, glowOn ? glow.strength : 0.0)
       ..setFloat(_idxGlowParams + 1, glow.power)
       ..setFloat(_idxGlowParams + 2, glow.tintMode.toDouble())
       ..setFloat(_idxGlowParams + 3, glow.insideOnly ? 1.0 : 0.0);
 
-    // uGlowColor (RGBA 0..1)
     _shader
       ..setFloat(_idxGlowColor + 0, glow.color.red / 255.0)
       ..setFloat(_idxGlowColor + 1, glow.color.green / 255.0)
       ..setFloat(_idxGlowColor + 2, glow.color.blue / 255.0)
       ..setFloat(_idxGlowColor + 3, glow.color.alpha / 255.0);
 
-    // uGlowOverrides: (lightness, saturation, blurSigmaPx, mix)
     final double mix = glowOn ? glow.mix : 0.0;
     final double targetLightness = glow.lightness ?? _settings.lightness;
     final double targetSaturation = glow.saturation ?? _settings.saturation;
@@ -670,7 +692,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       ..setFloat(_idxGlowOverrides + 2, targetBlurSigmaPx)
       ..setFloat(_idxGlowOverrides + 3, mix);
 
-    // uGlowFlags: (hasL, hasS, hasBlur, hasGlassColor) * enabled
     double f(bool cond) => (glowOn && cond) ? 1.0 : 0.0;
     _shader
       ..setFloat(_idxGlowFlags + 0, f(glow.lightness != null))
@@ -678,7 +699,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       ..setFloat(_idxGlowFlags + 2, f(glow.blur != null))
       ..setFloat(_idxGlowFlags + 3, f(glow.glassColor != null));
 
-    // uGlowGlass RGBA (0..1)
     final Color gg = glow.glassColor ?? const Color(0x00000000);
     _shader
       ..setFloat(_idxGlowGlass + 0, gg.red / 255.0)
@@ -686,7 +706,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       ..setFloat(_idxGlowGlass + 2, gg.blue / 255.0)
       ..setFloat(_idxGlowGlass + 3, gg.alpha / 255.0);
 
-    // uGlobalBlurSigma = globales Sigma in Gerätepixeln (für Delta-Blur)
     _shader.setFloat(
       _idxGlobalBlurSigma,
       _settings.blur * _devicePixelRatio,
@@ -701,7 +720,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     return Rect.fromLTRB(l, t, rr, bb);
   }
 
-  /// Computes a union path of all shapes in local coordinates for clipping.
   Path _computeUnionClipPath(
       List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes) {
     final path = Path();
@@ -727,7 +745,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     return path;
   }
 
-  /// Computes a union rectangle of all shapes, inflated by a margin for blur.
   Rect _computeUnionClipRect(
       List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes) {
     Rect? union;
@@ -737,7 +754,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
           MatrixUtils.transformRect(transformToThis, Offset.zero & ro.size);
       union = (union == null) ? rectLocal : union!.expandToInclude(rectLocal);
     }
-    // 3σ + thickness + safety padding to ensure sufficient sampling range.
     final double margin = (_settings.blur * 3.0) + _settings.thickness + 12.0;
     return (union ?? Rect.zero).inflate(margin);
   }
@@ -763,23 +779,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     final List<_PackedS> kernel = _getKernelAndMark(sigmaPx);
     final int nKernel = math.min(_impellerMaxKernel, kernel.length);
 
-    // Per-Shape-Touches kombinieren (Owner = Shape-Index)
     final ownedTouches = _combineTouches(shapes);
 
-    // Upload all required uniforms (also updates V-pass samples if needed).
     _uploadUniformsIfNeeded(shapeCount, shapes, nKernel, kernel, ownedTouches);
 
-    // Paint content that should appear ABOVE the glass first.
+    // ABOVE the glass first.
     _paintShapeContents(context, offset, shapes, glassContainsChild: true);
-
-    // Compute an exact clip path for shapes and an inflated sampling bounds.
-    final Path clipPath = _computeUnionClipPath(shapes);
-    if (clipPath.computeMetrics().isEmpty) {
-      _hHandle.layer = null;
-      _vHandle.layer = null;
-      super.paint(context, offset);
-      return;
-    }
 
     final Rect bounds = _snapRectToDeviceFull(_computeUnionClipRect(shapes));
 
@@ -788,82 +793,58 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       offset,
       bounds,
       (ctxRect, offRect) {
-        // Use a single path clip for both passes so the mask is identical.
-        ctxRect.pushClipPath(
-          true,
-          offRect,
-          bounds,
-          clipPath,
-          (ctx, off) {
-            // ---------- PASS 1: Horizontal blur ----------
-            if (sigmaPx > 0.0 && nKernel > 0) {
-              _blurH.setFloat(4, nKernel.toDouble()); // u_sample_count
-              if (nKernel != _lastKernelCountH) {
-                int base = 6;
-                for (int i = 0; i < nKernel; i++) {
-                  final s = kernel[i];
-                  _blurH
-                    ..setFloat(base + i * 4 + 0, s.tPx)
-                    ..setFloat(base + i * 4 + 1, 0.0)
-                    ..setFloat(base + i * 4 + 2, s.w)
-                    ..setFloat(base + i * 4 + 3, 0.0);
-                }
-                _lastKernelCountH = nKernel;
-              }
+        // ---------- PASS 1: Horizontal blur ----------
+        if (sigmaPx > 0.0 && nKernel > 0) {
+          final BackdropFilterLayer hLayer =
+              _hHandle.layer ?? BackdropFilterLayer();
+          hLayer..filter = ImageFilter.shader(_blurH);
 
-              final BackdropFilterLayer hLayer =
-                  _hHandle.layer ?? BackdropFilterLayer();
-              hLayer..filter = ImageFilter.shader(_blurH);
+          ctxRect.pushLayer(hLayer, (c2, o2) {
+            final paint = Paint()..color = const Color(0x01000000);
+            c2.canvas.drawRect(bounds.shift(-offRect), paint);
+          }, offRect);
+          _hHandle.layer = hLayer;
+        } else {
+          _hHandle.layer = null;
+        }
 
-              ctx.pushLayer(hLayer, (c2, o2) {
-                final paint = Paint()..color = const Color(0x01000000);
-                c2.canvas.drawRect(bounds.shift(-off), paint);
-              }, off);
-              _hHandle.layer = hLayer;
-            } else {
-              _hHandle.layer = null;
-            }
+        // ---------- PASS 2: Vertical blur + glass ----------
+        final int nV = (sigmaPx > 0.0) ? nKernel : 0;
 
-            // ---------- PASS 2: Vertical blur + glass ----------
-            final int nV = (sigmaPx > 0.0) ? nKernel : 0;
+        _shader
+          ..setFloat(_blurBaseFloat + 0, 0.0)
+          ..setFloat(_blurBaseFloat + 1, 1.0)
+          ..setFloat(_blurBaseFloat + 2, nV.toDouble())
+          ..setFloat(_blurBaseFloat + 3, 0.0);
 
+        if (nV != _lastKernelCountV) {
+          int baseV = _blurSamplesFloat;
+          for (int i = 0; i < nV; i++) {
+            final s = kernel[i];
             _shader
-              ..setFloat(_blurBaseFloat + 0, 0.0) // dir.x
-              ..setFloat(_blurBaseFloat + 1, 1.0) // dir.y
-              ..setFloat(_blurBaseFloat + 2, nV.toDouble())
-              ..setFloat(_blurBaseFloat + 3, 0.0); // clamp
+              ..setFloat(baseV + 0, s.tPx)
+              ..setFloat(baseV + 1, 0.0)
+              ..setFloat(baseV + 2, s.w)
+              ..setFloat(baseV + 3, 0.0);
+            baseV += 4;
+          }
+          _lastKernelCountV = nV;
+        }
 
-            if (nV != _lastKernelCountV) {
-              int baseV = _blurSamplesFloat;
-              for (int i = 0; i < nV; i++) {
-                final s = kernel[i];
-                _shader
-                  ..setFloat(baseV + 0, s.tPx)
-                  ..setFloat(baseV + 1, 0.0)
-                  ..setFloat(baseV + 2, s.w)
-                  ..setFloat(baseV + 3, 0.0);
-                baseV += 4;
-              }
-              _lastKernelCountV = nV;
-            }
+        final BackdropFilterLayer vLayer =
+            _vHandle.layer ?? BackdropFilterLayer();
+        vLayer..filter = ImageFilter.shader(_shader);
 
-            final BackdropFilterLayer vLayer =
-                _vHandle.layer ?? BackdropFilterLayer();
-            vLayer..filter = ImageFilter.shader(_shader);
-
-            ctx.pushLayer(vLayer, (c2, o2) {
-              final paint = Paint()..color = const Color(0x01000000);
-              c2.canvas.drawRect(bounds.shift(-off), paint);
-            }, off);
-            _vHandle.layer = vLayer;
-          },
-          clipBehavior: Clip.hardEdge,
-        );
+        ctxRect.pushLayer(vLayer, (c2, o2) {
+          final paint = Paint()..color = const Color(0x01000000);
+          c2.canvas.drawRect(bounds.shift(-offRect), paint);
+        }, offRect);
+        _vHandle.layer = vLayer;
       },
       clipBehavior: Clip.hardEdge,
     );
 
-    // Finally, paint content that should appear UNDER the glass.
+    // UNDER the glass.
     _paintShapeContents(context, offset, shapes, glassContainsChild: false);
 
     super.paint(context, offset);
@@ -877,8 +858,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     super.dispose();
   }
 
-  /// Paints either the child content that is inside the glass or the content
-  /// outside of it depending on [glassContainsChild].
   void _paintShapeContents(
     PaintingContext context,
     Offset offset,
