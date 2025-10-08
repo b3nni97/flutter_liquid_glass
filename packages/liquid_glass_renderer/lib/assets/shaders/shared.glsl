@@ -34,18 +34,19 @@
 
 // ---------- Host-provided uniforms (declared in main .frag) ----------
 // Base blur kernel header/taps, size, etc. exist in deinem Hauptshader.
-// Wir listen hier nur Glow-spezifische Inputs, die diese Datei nutzt:
+// Wir listen hier nur Glow-/Touch-spezifische Inputs, die diese Datei nutzt:
 //
-// uniform float uTouchCount_f;         // 0..8
-// uniform vec4  uTouches[8];           // (x_px, y_px, radius_px, fade_px)
-// uniform float uTouchGlowStrengths[8];// NEU: per-touch Glow-Multiplikator (0..1)
-// uniform vec4  uGlowParams;           // (strength, power, tintMode, insideOnly)
-// uniform vec4  uGlowColor;            // (r, g, b, a)  -> a = Tint-Intensität
+// uniform float uTouchCount_f;          // 0..8
+// uniform vec4  uTouches[8];            // (x_px, y_px, radius_px, fade_px)
+// uniform float uTouchOwners[8];        // NEU: Owner-Shape-Index je Touch (-1 = global)
+// uniform float uTouchGlowStrengths[8]; // NEU: per-touch Glow-Multiplikator (0..1)
+// uniform vec4  uGlowParams;            // (strength, power, tintMode, insideOnly)
+// uniform vec4  uGlowColor;             // (r, g, b, a)  -> a = Tint-Intensität
 //
 // NEU (für GlowStyle-Overrides):
-// uniform vec4  uGlowOverrides;        // (lightness, saturation, blurSigmaPx, mix)
-// uniform vec4  uGlowFlags;            // (hasLightness, hasSaturation, hasBlur, hasGlassColor)
-// uniform vec4  uGlowGlass;            // (glass_r, glass_g, glass_b, glass_a)
+// uniform vec4  uGlowOverrides;         // (lightness, saturation, blurSigmaPx, mix)
+// uniform vec4  uGlowFlags;             // (hasLightness, hasSaturation, hasBlur, hasGlassColor)
+// uniform vec4  uGlowGlass;             // (glass_r, glass_g, glass_b, glass_a)
 
 // ---------- Small utilities ----------
 float hash12(vec2 p){
@@ -335,7 +336,7 @@ vec3 calculateLighting(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Post color ops
+/* Post color ops */
 // ────────────────────────────────────────────────────────────────────────────
 vec3 applySaturationLightness(vec3 color, float saturation, float lightness){
   float luminance = dot(color, vec3(0.299, 0.587, 0.114));
@@ -367,7 +368,7 @@ vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
 // ────────────────────────────────────────────────────────────────────────────
 // Glow helpers: Maske & lokaler Zusatz-Blur (isotrop, kleiner Kernel)
 // ────────────────────────────────────────────────────────────────────────────
-float glowTouchMask(vec2 pPx, float insideOnly, float sd){
+float glowTouchMask(vec2 pPx, float insideOnly, float sd, int currentShapeIdx){
   float inMask = (insideOnly >= 0.5) ? step(sd, 0.0) : 1.0;
   float n = uTouchCount_f;
   if (!(n > 0.5)) return 0.0;
@@ -375,13 +376,20 @@ float glowTouchMask(vec2 pPx, float insideOnly, float sd){
   float m = 0.0;
   for (int i=0; i<8; ++i){
     if (i >= int(n)) break;
+
+    // Ownership-Filter: Touch gilt nur für sein Shape (oder global = -1).
+    int owner = int(floor(uTouchOwners[i] + 0.5));
+    if (owner >= 0 && owner != currentShapeIdx) {
+      continue;
+    }
+
     vec4 tp = uTouches[i];
     float d = length(pPx - tp.xy);
     float inner = tp.z;
     float outer = tp.z + max(tp.w, 1e-3);
     float mi = smoothstep(outer, inner, d);
 
-    // NEU: pro-Touch Glow-Multiplikator (0..1)
+    // per-Touch Glow-Multiplikator (0..1)
     float s = clamp(uTouchGlowStrengths[i], 0.0, 1.0);
     mi *= s;
 
@@ -426,7 +434,8 @@ vec4 renderLiquidGlass(
   float refractiveIndex, float chromaticAberration,
   vec4  glassColor, vec2 lightDirection, float lightIntensity, float ambientStrength,
   sampler2D backgroundTexture, vec3 normal, float foregroundAlpha,
-  float saturation, float lightness, float rimWidthPx, float rimSharpness
+  float saturation, float lightness, float rimWidthPx, float rimSharpness,
+  int   currentShapeIdx // <- NEU: aktiver Shape-Index dieses Pixels
 ){
   vec4 backgroundColor = texScreen(backgroundTexture, screenUV);
   if (foregroundAlpha < 0.001) return backgroundColor;
@@ -479,7 +488,7 @@ vec4 renderLiquidGlass(
 
   if (gStrength > 0.0001 && uTouchCount_f > 0.5){
     vec2 pPx = screenUV * uSizePx;
-    float maskRaw = glowTouchMask(pPx, gInside, sd);
+    float maskRaw = glowTouchMask(pPx, gInside, sd, currentShapeIdx);
     if (maskRaw > 0.0){
       // Mask shaping: power & strength & mix
       float shaped = pow(clamp(maskRaw, 0.0, 1.0), gPower) * gStrength * oMix;

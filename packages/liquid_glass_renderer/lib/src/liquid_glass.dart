@@ -17,9 +17,7 @@ import 'package:meta/meta.dart';
 class LiquidGlass extends StatelessWidget {
   /// Standalone-Variante: erstellt einen eigenen [LiquidGlassLayer].
   ///
-  /// [touches] werden dabei direkt an den Layer weitergereicht, damit
-  /// Glow/Hotspots funktionieren. In dieser Variante hat [blend] keine Wirkung
-  /// auf andere Shapes, da kein Sharing stattfindet.
+  /// [touches] werden **lokal** für dieses eine Shape genutzt.
   const LiquidGlass({
     required this.child,
     required this.shape,
@@ -33,17 +31,17 @@ class LiquidGlass extends StatelessWidget {
 
   /// In-Layer-Variante: erwartet bereits einen übergeordneten [LiquidGlassLayer].
   ///
-  /// Die [touches] werden hier NICHT gebraucht – sie gehören auf
-  /// den gemeinsamen Layer.
+  /// [touches] gelten **nur** für dieses Shape; der Layer vergibt intern
+  /// den passenden Owner-Index.
   const LiquidGlass.inLayer({
     required this.child,
     required this.shape,
     super.key,
     this.glassContainsChild = true,
     this.clipBehavior = Clip.hardEdge,
+    this.touches = const <TouchPoint>[],
   })  : _settings = null,
-        restrictThickness = false,
-        touches = const <TouchPoint>[];
+        restrictThickness = false;
 
   /// The child of this widget.
   final Widget child;
@@ -60,7 +58,7 @@ class LiquidGlass extends StatelessWidget {
   /// {@macro liquid_glass_renderer.restrict_thickness}
   final bool restrictThickness;
 
-  /// Optional touch hotspots (nur in der Standalone-Variante relevant).
+  /// Touch-Hotspots, immer **per Shape**.
   final List<TouchPoint> touches;
 
   final LiquidGlassSettings? _settings;
@@ -73,6 +71,7 @@ class LiquidGlass extends StatelessWidget {
         return _RawLiquidGlass(
           shape: shape,
           glassContainsChild: glassContainsChild,
+          localTouches: touches, // lokale Touches für dieses Shape
           child: ClipPath(
             clipper: ShapeBorderClipper(shape: shape),
             clipBehavior: clipBehavior,
@@ -81,14 +80,15 @@ class LiquidGlass extends StatelessWidget {
         );
 
       case final settings:
-        // Standalone: eigener Layer + Touches durchreichen
+        // Standalone: eigener Layer; Touches **nicht** am Layer,
+        // sondern als lokale Touches des einen Shapes.
         return LiquidGlassLayer(
           settings: settings,
           restrictThickness: restrictThickness,
-          touches: touches,
           child: _RawLiquidGlass(
             shape: shape,
             glassContainsChild: glassContainsChild,
+            localTouches: touches,
             child: ClipPath(
               clipper: ShapeBorderClipper(shape: shape),
               clipBehavior: clipBehavior,
@@ -105,16 +105,21 @@ class _RawLiquidGlass extends SingleChildRenderObjectWidget {
     required super.child,
     required this.shape,
     required this.glassContainsChild,
+    required this.localTouches,
   });
 
   final LiquidShape shape;
   final bool glassContainsChild;
+
+  /// Touches, die **nur** zu diesem Shape gehören.
+  final List<TouchPoint> localTouches;
 
   @override
   RenderObject createRenderObject(BuildContext context) {
     return RenderLiquidGlass(
       shape: shape,
       glassContainsChild: glassContainsChild,
+      localTouches: localTouches,
     );
   }
 
@@ -125,7 +130,8 @@ class _RawLiquidGlass extends SingleChildRenderObjectWidget {
   ) {
     renderObject
       ..shape = shape
-      ..glassContainsChild = glassContainsChild;
+      ..glassContainsChild = glassContainsChild
+      ..localTouches = localTouches;
   }
 }
 
@@ -134,8 +140,10 @@ class RenderLiquidGlass extends RenderProxyBox {
   RenderLiquidGlass({
     required LiquidShape shape,
     required bool glassContainsChild,
+    List<TouchPoint> localTouches = const <TouchPoint>[],
   })  : _shape = shape,
-        _glassContainsChild = glassContainsChild;
+        _glassContainsChild = glassContainsChild,
+        _localTouches = List<TouchPoint>.from(localTouches);
 
   late LiquidShape _shape;
   LiquidShape get shape => _shape;
@@ -153,6 +161,14 @@ class RenderLiquidGlass extends RenderProxyBox {
     _glassContainsChild = value;
     markNeedsPaint();
     _updateGlassLink();
+  }
+
+  List<TouchPoint> _localTouches;
+  List<TouchPoint> get localTouches => _localTouches;
+  set localTouches(List<TouchPoint> v) {
+    _localTouches = List<TouchPoint>.from(v);
+    markNeedsPaint();
+    _glassLink?.notifyShapeLayoutChanged(this);
   }
 
   GlassLink? _glassLink;

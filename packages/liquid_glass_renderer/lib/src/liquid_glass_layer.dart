@@ -24,7 +24,6 @@ class LiquidGlassLayer extends StatefulWidget {
     required this.child,
     this.settings = const LiquidGlassSettings(),
     this.restrictThickness = true,
-    this.touches = const <TouchPoint>[],
     super.key,
   });
 
@@ -38,9 +37,6 @@ class LiquidGlassLayer extends StatefulWidget {
   /// the smallest shape in the layer to avoid artifacts on very thin shapes.
   final bool restrictThickness;
 
-  /// Optional list of touch hotspots (logical px); used by the shader to glow.
-  final List<TouchPoint> touches;
-
   @override
   State<LiquidGlassLayer> createState() => _LiquidGlassLayerState();
 }
@@ -52,13 +48,13 @@ class TouchPoint {
     this.position, {
     this.radiusPx = 60,
     this.fadePx = 40,
-    this.glowStrength = 1.0, // <- NEU: 0..1 Multiplier pro Touch
+    this.glowStrength = 1.0, // 0..1 Multiplier pro Touch
   });
 
   final Offset position; // logical pixels
   final double radiusPx; // logical px
   final double fadePx; // logical px
-  final double glowStrength; // 0..1, wird separat an den Shader übertragen
+  final double glowStrength; // 0..1
 }
 
 class _LiquidGlassLayerState extends State<LiquidGlassLayer>
@@ -88,7 +84,6 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer>
           settings: widget.settings,
           debugRenderRefractionMap: false,
           restrictThickness: widget.restrictThickness,
-          touches: widget.touches,
           child: child!,
         ),
         child: child,
@@ -105,7 +100,6 @@ class _RawShapes extends SingleChildRenderObjectWidget {
     required this.settings,
     required this.debugRenderRefractionMap,
     required this.restrictThickness,
-    required this.touches,
     required Widget super.child,
   });
 
@@ -116,8 +110,6 @@ class _RawShapes extends SingleChildRenderObjectWidget {
   final bool debugRenderRefractionMap;
   final bool restrictThickness;
 
-  final List<TouchPoint> touches;
-
   @override
   RenderObject createRenderObject(BuildContext context) {
     return RenderLiquidGlassLayer(
@@ -127,7 +119,6 @@ class _RawShapes extends SingleChildRenderObjectWidget {
       settings: settings,
       debugRenderRefractionMap: debugRenderRefractionMap,
       restrictThickness: restrictThickness,
-      touches: touches,
     );
   }
 
@@ -141,8 +132,7 @@ class _RawShapes extends SingleChildRenderObjectWidget {
       ..settings = settings
       ..debugRenderRefractionMap = debugRenderRefractionMap
       ..restrictThickness = restrictThickness
-      ..setShaders(shader, blurH)
-      ..touches = touches;
+      ..setShaders(shader, blurH);
   }
 }
 
@@ -171,14 +161,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     required LiquidGlassSettings settings,
     required bool restrictThickness,
     bool debugRenderRefractionMap = false,
-    List<TouchPoint> touches = const [],
   })  : _devicePixelRatio = devicePixelRatio,
         _shader = shader,
         _blurH = blurH,
         _settings = settings,
         _debugRenderRefractionMap = debugRenderRefractionMap,
         _restrictThickness = restrictThickness,
-        _touches = List<TouchPoint>.from(touches),
         _glassLink = GlassLink() {
     _glassLink.addListener(_onGlassLinkChanged);
     _initHBlurInvariants();
@@ -198,12 +186,14 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   // 136..335 : u_samples[0..49] (vec4 per sample → 50 * 4 = 200 floats)
   // 336      : uTouchCount_f (float)
   // 337..368 : uTouches[8] (8 * vec4)
-  // 369..372 : uGlowParams (vec4)
-  // 373..376 : uGlowColor  (vec4)
-  // 377..380 : uGlowOverrides (vec4: lightness, saturation, blurSigmaPx, mix)
-  // 381..384 : uGlowFlags    (vec4: hasLightness, hasSaturation, hasBlur, hasGlassColor)
-  // 385..388 : uGlowGlass    (vec4: RGBA 0..1)
-  // 389      : uGlobalBlurSigma (float)
+  // 369..376 : uTouchOwners[8] (8 * float)  ← NEU direkt nach uTouches
+  // 377..380 : uGlowParams (vec4)
+  // 381..384 : uGlowColor  (vec4)
+  // 385..388 : uGlowOverrides (vec4: lightness, saturation, blurSigmaPx, mix)
+  // 389..392 : uGlowFlags    (vec4: hasLightness, hasSaturation, hasBlur, hasGlassColor)
+  // 393..396 : uGlowGlass    (vec4: RGBA 0..1)
+  // 397      : uGlobalBlurSigma (float)
+  // 398..405 : uTouchGlowStrengths[8] (8 * float)
   static const int _idxGlassColor = 2;
   static const int _idxOpticalProps = 6;
   static const int _idxLightConfig = 10;
@@ -216,18 +206,18 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _blurBaseFloat = 132; // uBlurHeader.x (u_dir_x)
   static const int _blurSamplesFloat = 136; // u_samples[0].x
 
-  // Touch/Glow indices (match liquid_glass.frag layout)
+  // Touch/Glow indices (match liquid_glass.frag layout ordering)
   static const int _idxTouchCount = 336;
   static const int _idxTouches = 337; // 8 * vec4 → 32 floats
-  static const int _idxGlowParams = 369; // vec4
-  static const int _idxGlowColor = 373; // vec4
-  static const int _idxGlowOverrides = 377; // vec4
-  static const int _idxGlowFlags = 381; // vec4
-  static const int _idxGlowGlass = 385; // vec4
-  static const int _idxGlobalBlurSigma = 389; // float
-
-  // NEU: per-touch glowStrengths (8 floats) – schreibt ab der nächsten freien Slot-ID
-  static const int _idxTouchGlowStrengths = 390; // floats[8] → 390..397
+  static const int _idxTouchOwners =
+      369; // 8 floats (NEU, direkt nach uTouches)
+  static const int _idxGlowParams = 377; // vec4
+  static const int _idxGlowColor = 381; // vec4
+  static const int _idxGlowOverrides = 385; // vec4
+  static const int _idxGlowFlags = 389; // vec4
+  static const int _idxGlowGlass = 393; // vec4
+  static const int _idxGlobalBlurSigma = 397; // float
+  static const int _idxTouchGlowStrengths = 398; // floats[8] → 398..405
 
   static const double _eps = 0.01;
 
@@ -242,10 +232,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   bool _debugRenderRefractionMap;
   bool _restrictThickness;
 
-  // Dynamic input
-  List<TouchPoint> _touches;
-
-  // Mutators
+  // --- Setters (wieder hinzugefügt) ---
   set devicePixelRatio(double value) {
     if (_devicePixelRatio == value) return;
     _devicePixelRatio = value;
@@ -269,11 +256,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _restrictThickness = value;
     markNeedsPaint();
   }
-
-  set touches(List<TouchPoint> v) {
-    _touches = List<TouchPoint>.from(v);
-    markNeedsPaint();
-  }
+  // ------------------------------------
 
   // Cached kernels and state to minimize uniform uploads.
   List<_PackedS>? _cachedKernel;
@@ -319,9 +302,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _hInvariantsInitialized = true;
   }
 
-  /// Collects all [RawShape]s participating in this layer.
-  List<(RenderLiquidGlass, RawShape)> collectShapes() {
-    final result = <(RenderLiquidGlass, RawShape)>[];
+  /// Collects all [RawShape]s participating in this layer + lokale Touches je Shape.
+  List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> collectShapes() {
+    final result = <(RenderLiquidGlass, RawShape, List<TouchPoint>)>[];
     final computed = _glassLink.computedShapes;
     if (computed.length > _maxShapesPerLayer) {
       throw UnsupportedError('Only $_maxShapesPerLayer shapes are supported!');
@@ -340,6 +323,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
             size: s.globalBounds.size,
             scale: scale,
           ),
+          ro.localTouches, // ← lokale Touches des Shapes (implizit)
         ));
       }
     }
@@ -452,7 +436,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _lastShapeCount = shapeCount;
   }
 
-  bool _shapesChanged(List<(RenderLiquidGlass, RawShape)> shapes) {
+  bool _shapesChanged(
+      List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes) {
     final shapeList = shapes.map((e) => e.$2).toList(growable: false);
     if (_lastShapes == null || _lastShapes!.length != shapeList.length) {
       _lastShapes = shapeList;
@@ -498,13 +483,35 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     0, 0, 0, 1,
   ];
 
+  /// Interne Struktur: Touch + Owner-Index.
+  List<_OwnedTouch> _combineTouches(
+    List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes,
+  ) {
+    final combined = <_OwnedTouch>[];
+    for (var i = 0; i < shapes.length; i++) {
+      final local = shapes[i].$3;
+      if (local.isEmpty) continue;
+      for (final lt in local) {
+        combined.add(_OwnedTouch(
+          position: lt.position,
+          radiusPx: lt.radiusPx,
+          fadePx: lt.fadePx,
+          glowStrength: lt.glowStrength,
+          ownerIndex: i, // dieser Touch gehört Shape i
+        ));
+      }
+    }
+    return combined;
+  }
+
   /// Uploads all uniforms required for the current frame if settings, shapes,
   /// or kernel configuration have changed.
   void _uploadUniformsIfNeeded(
     int shapeCount,
-    List<(RenderLiquidGlass, RawShape)> shapes,
+    List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes,
     int nKernel,
     List<_PackedS> kernel,
+    List<_OwnedTouch> ownedTouches,
   ) {
     final settingsChanged = _lastSettings != _settings;
     final shapesChanged = _shapesChanged(shapes);
@@ -597,14 +604,14 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       _lastKernelCountV = nKernel;
     }
 
-    // ───────────────────── Touches & Glow (from settings) ────────────────────
-    // Touch count (clamped to MAX_TOUCHES=8 in shader)
-    final int nTouches = _touches.length.clamp(0, 8);
+    // ───────────────────── Touches & Glow ────────────────────
+    // Kombinierte Touches (per Shape) + Owner-IDs setzen
+    final int nTouches = ownedTouches.length.clamp(0, 8);
     _shader.setFloat(_idxTouchCount, nTouches.toDouble());
     for (int i = 0; i < 8; i++) {
       final base = _idxTouches + i * 4;
       if (i < nTouches) {
-        final tp = _touches[i];
+        final tp = ownedTouches[i];
         _shader
           ..setFloat(base + 0, tp.position.dx * _devicePixelRatio)
           ..setFloat(base + 1, tp.position.dy * _devicePixelRatio)
@@ -619,10 +626,17 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       }
     }
 
-    // NEU: pro-touch Glow-Strength separat übertragen (Floats[8] ab _idxTouchGlowStrengths)
+    // Owner-Indizes direkt nach uTouches
+    for (int i = 0; i < 8; i++) {
+      final double owner =
+          (i < nTouches) ? ownedTouches[i].ownerIndex.toDouble() : -1.0;
+      _shader.setFloat(_idxTouchOwners + i, owner);
+    }
+
+    // Pro-touch Glow-Strengths
     for (int i = 0; i < 8; i++) {
       final double s =
-          (i < nTouches) ? _touches[i].glowStrength.clamp(0.0, 1.0) : 0.0;
+          (i < nTouches) ? ownedTouches[i].glowStrength.clamp(0.0, 1.0) : 0.0;
       _shader.setFloat(_idxTouchGlowStrengths + i, s);
     }
 
@@ -637,7 +651,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       ..setFloat(_idxGlowParams + 2, glow.tintMode.toDouble())
       ..setFloat(_idxGlowParams + 3, glow.insideOnly ? 1.0 : 0.0);
 
-    // uGlowColor (RGBA 0..1) – A kann als Tint-Intensity genutzt werden
+    // uGlowColor (RGBA 0..1)
     _shader
       ..setFloat(_idxGlowColor + 0, glow.color.red / 255.0)
       ..setFloat(_idxGlowColor + 1, glow.color.green / 255.0)
@@ -664,7 +678,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       ..setFloat(_idxGlowFlags + 2, f(glow.blur != null))
       ..setFloat(_idxGlowFlags + 3, f(glow.glassColor != null));
 
-    // uGlowGlass RGBA (0..1) – nur relevant wenn Flag[3] == 1
+    // uGlowGlass RGBA (0..1)
     final Color gg = glow.glassColor ?? const Color(0x00000000);
     _shader
       ..setFloat(_idxGlowGlass + 0, gg.red / 255.0)
@@ -688,9 +702,10 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   }
 
   /// Computes a union path of all shapes in local coordinates for clipping.
-  Path _computeUnionClipPath(List<(RenderLiquidGlass, RawShape)> shapes) {
+  Path _computeUnionClipPath(
+      List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes) {
     final path = Path();
-    for (final (ro, raw) in shapes) {
+    for (final (ro, raw, _) in shapes) {
       final Matrix4 toThis = ro.getTransformTo(this);
       final Rect rectLocal =
           MatrixUtils.transformRect(toThis, Offset.zero & ro.size);
@@ -713,9 +728,10 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   }
 
   /// Computes a union rectangle of all shapes, inflated by a margin for blur.
-  Rect _computeUnionClipRect(List<(RenderLiquidGlass, RawShape)> shapes) {
+  Rect _computeUnionClipRect(
+      List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes) {
     Rect? union;
-    for (final (ro, _) in shapes) {
+    for (final (ro, _, __) in shapes) {
       final transformToThis = ro.getTransformTo(this);
       final rectLocal =
           MatrixUtils.transformRect(transformToThis, Offset.zero & ro.size);
@@ -747,8 +763,11 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     final List<_PackedS> kernel = _getKernelAndMark(sigmaPx);
     final int nKernel = math.min(_impellerMaxKernel, kernel.length);
 
+    // Per-Shape-Touches kombinieren (Owner = Shape-Index)
+    final ownedTouches = _combineTouches(shapes);
+
     // Upload all required uniforms (also updates V-pass samples if needed).
-    _uploadUniformsIfNeeded(shapeCount, shapes, nKernel, kernel);
+    _uploadUniformsIfNeeded(shapeCount, shapes, nKernel, kernel, ownedTouches);
 
     // Paint content that should appear ABOVE the glass first.
     _paintShapeContents(context, offset, shapes, glassContainsChild: true);
@@ -863,14 +882,30 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   void _paintShapeContents(
     PaintingContext context,
     Offset offset,
-    List<(RenderLiquidGlass, RawShape)> shapes, {
+    List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes, {
     required bool glassContainsChild,
   }) {
-    for (final (ro, _) in shapes) {
+    for (final (ro, _, __) in shapes) {
       if (ro.glassContainsChild == glassContainsChild) {
         final Matrix4 transform = ro.getTransformTo(this);
         context.pushTransform(true, offset, transform, ro.paintFromLayer);
       }
     }
   }
+}
+
+class _OwnedTouch {
+  _OwnedTouch({
+    required this.position,
+    required this.radiusPx,
+    required this.fadePx,
+    required this.glowStrength,
+    required this.ownerIndex,
+  });
+
+  final Offset position;
+  final double radiusPx;
+  final double fadePx;
+  final double glowStrength;
+  final int ownerIndex; // 0..N-1
 }
