@@ -122,51 +122,23 @@ vec3 fastNormalize3(vec3 v){
 // ============================================================================
 // Normals — fast path
 // ============================================================================
-#ifndef NORMAL_FILTER_PX
-#define NORMAL_FILTER_PX 1.0
-#endif
-#ifndef MID_WARP_POWER
-#define MID_WARP_POWER 1.8
-#endif
-#ifndef SIDE_MASK_POWER
-#define SIDE_MASK_POWER 3.0
-#endif
-#ifndef SIDE_MASK_HARD
-#define SIDE_MASK_HARD 0.6
-#endif
-
+// MODIFIED: Replaced heuristic logic with the blend-safe "Tunable Soft" method.
 vec3 getNormal(float sd, float thickness, int idx){
-  vec2 g  = vec2(dFdx(sd), dFdy(sd));
-  vec2 gN = fastNormalize2(g + vec2(LG_EPS));
+  // This version is safe for smooth unions and produces a soft, adjustable curve.
+  float dx = dFdx(sd);
+  float dy = dFdy(sd);
 
-  // Project gradient to a hemisphere based on signed distance.
-  float n_cos = smoothstep(-thickness - 32.0, 0.0, sd);
-  float n_sin = sqrt(max(1.0 - n_cos * n_cos, 0.0));
+  // Tuned values from your final configuration for the desired look.
+  const float plateauWidth = 24.0;
+  const float softness = 1.8;
 
-  // No shape index → standard normal.
-  if (idx < 0){
-    vec2 xy = gN * n_cos;
-    return fastNormalize3(vec3(xy, n_sin));
-  }
-
-  // Heuristic normal shaping: emphasize mid-height and side edges.
-  float st, cr; vec2 c, sz;
-  readShapeAt(idx, st, c, sz, cr);
-
-  float halfH = (st == 2.0)
-      ? max(sz.y * 0.5, 1e-4)
-      : max(max(sz.y * 0.5, cr), 1e-4);
-
-  float yRel    = clamp(abs(FlutterFragCoord().y - c.y) / halfH, 0.0, 1.0);
-  float midMask = pow(1.0 - yRel, MID_WARP_POWER);
-
-  float side     = smoothstep(SIDE_MASK_HARD, 1.0, abs(gN.x));
-  float sideMask = pow(side, SIDE_MASK_POWER);
-
-  float boost = 1.0 + (midMask * sideMask);
-
-  vec2 xy = gN * n_cos * boost;
-  return fastNormalize3(vec3(xy, n_sin));
+  // Calculate the normal's curvature with a central plateau.
+  float fullRange = thickness + plateauWidth;
+  float t = max(fullRange + sd, 0.0) / max(fullRange, 1e-6);
+  float n_cos = pow(t, softness);
+  float n_sin = sqrt(max(0.0, 1.0 - n_cos * n_cos));
+  
+  return normalize(vec3(dx * n_cos, dy * n_cos, n_sin));
 }
 
 void main(){
