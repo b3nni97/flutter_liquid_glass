@@ -33,20 +33,30 @@
 #endif
 
 // ---------- Host-provided uniforms (declared in main .frag) ----------
-// Base blur kernel header/taps, size, etc. exist in deinem Hauptshader.
-// Wir listen hier nur Glow-/Touch-spezifische Inputs, die diese Datei nutzt:
 //
 // uniform float uTouchCount_f;          // 0..8
 // uniform vec4  uTouches[8];            // (x_px, y_px, radius_px, fade_px)
-// uniform float uTouchOwners[8];        // NEU: Owner-Shape-Index je Touch (-1 = global)
-// uniform float uTouchGlowStrengths[8]; // NEU: per-touch Glow-Multiplikator (0..1)
+// uniform float uTouchOwners[8];        // Owner-Shape-Index je Touch (-1 = current)
+// uniform float uTouchGlowStrengths[8]; // per-touch Glow-Multiplikator (0..1)
 // uniform vec4  uGlowParams;            // (strength, power, tintMode, insideOnly)
 // uniform vec4  uGlowColor;             // (r, g, b, a)  -> a = Tint-Intensität
 //
-// NEU (für GlowStyle-Overrides):
+// GlowStyle-Overrides:
 // uniform vec4  uGlowOverrides;         // (lightness, saturation, blurSigmaPx, mix)
-// uniform vec4  uGlowFlags;             // (hasLightness, hasSaturation, hasBlur, hasGlassColor)
+// uniform vec4  uGlowFlags;             // (hasL, hasS, hasBlur, hasGlassColor)
 // uniform vec4  uGlowGlass;             // (glass_r, glass_g, glass_b, glass_a)
+// uniform float uGlobalBlurSigma;       // Basis-Blur (Sigma, px)
+//
+// Außerdem:
+// uniform vec2  uSize;
+// uniform vec4  uBlurHeader;            // dir.x, dir.y, sample_count, tile_mode
+// uniform vec4  u_samples[50];
+// uniform float uShapeData[16*6];       // (type, cx, cy, w, h, r)
+
+#define u_dir_x        (uBlurHeader.x)
+#define u_dir_y        (uBlurHeader.y)
+#define u_sample_count (uBlurHeader.z)
+#define u_tile_mode    (uBlurHeader.w)
 
 // ---------- Small utilities ----------
 float hash12(vec2 p){
@@ -109,7 +119,44 @@ vec2 tile_uv_mode(vec2 uv, vec2 size, float mode){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Impeller 1D Gaussian (inline); benötigt u_* aus dem Host
+// 1) Exakter Basis-SDF der Shape (ohne Union/Blend) für Owner-Gate
+// ────────────────────────────────────────────────────────────────────────────
+void _readShapeRaw(int idx, out float st, out vec2 c, out vec2 sz, out float cr){
+  int base = idx * 6;
+  st = uShapeData[base + 0];
+  c  = vec2(uShapeData[base + 1], uShapeData[base + 2]);
+  sz = vec2(uShapeData[base + 3], uShapeData[base + 4]);
+  cr = uShapeData[base + 5];
+}
+
+float _sdRRectCore(vec2 p, vec2 c, vec2 size, float r){
+  vec2 halfSize = max(size * 0.5, vec2(0.0));
+  float rad = clamp(r, 0.0, min(halfSize.x, halfSize.y));
+  vec2 q = abs(p - c) - (halfSize - vec2(rad));
+  return length(max(q, 0.0)) - rad + min(max(q.x, q.y), 0.0);
+}
+
+// Ellipse-Approx: skaliere in Einheitskreis, skaliere Distanz zurück
+float _sdEllipseApprox(vec2 p, vec2 c, vec2 size){
+  vec2 ab = max(size * 0.5, vec2(1e-4));
+  vec2 d  = (p - c) / ab;
+  float k = length(d) - 1.0;
+  return k * min(ab.x, ab.y);
+}
+
+// SDF der *originalen* Shape-Geometrie (keine Union-Aufdopplung)
+float sdShapeCoreAt(int idx, vec2 p){
+  float st, cr; vec2 c, sz;
+  _readShapeRaw(idx, st, c, sz, cr);
+  if (st == 2.0) {
+    return _sdEllipseApprox(p, c, sz);
+  } else {
+    return _sdRRectCore(p, c, sz, cr);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 2) Impeller 1D Gaussian (inline); benötigt u_* aus dem Host
 // ────────────────────────────────────────────────────────────────────────────
 vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
   vec2 pixel    = vec2(1.0 / uSize.x, 1.0 / uSize.y);
@@ -368,43 +415,49 @@ vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
 // ────────────────────────────────────────────────────────────────────────────
 // Glow helpers: Maske & lokaler Zusatz-Blur (isotrop, kleiner Kernel)
 // ────────────────────────────────────────────────────────────────────────────
-float glowTouchMask(vec2 pPx, float insideOnly, float sd, int currentShapeIdx){
-  float inMask = (insideOnly >= 0.5) ? step(sd, 0.0) : 1.0;
-  float n = uTouchCount_f;
-  if (!(n > 0.5)) return 0.0;
+#ifndef GLOW_OWNER_FEATHER_PX
+#define GLOW_OWNER_FEATHER_PX 1.6
+#endif
 
-  float m = 0.0;
+// pPx  = Screen-Pixel-Koords (für uTouches in px)
+// pSdf = SDF-Koords wie in sceneSDF (uTransform angewendet)
+float glowTouchMask(vec2 pPx, vec2 pSdf, float /*insideOnly*/, float /*sdUnion*/, int currentShapeIdx){
+  float n = uTouchCount_f;
+  if (!(n > 0.5) || currentShapeIdx < 0) return 0.0;
+
+  float outMask = 0.0;
+
   for (int i=0; i<8; ++i){
     if (i >= int(n)) break;
 
-    // Ownership-Filter: Touch gilt nur für sein Shape (oder global = -1).
-    int owner = int(floor(uTouchOwners[i] + 0.5));
-    if (owner >= 0 && owner != currentShapeIdx) {
-      continue;
-    }
+    int owner    = int(floor(uTouchOwners[i] + 0.5));
+    int shapeIdx = (owner >= 0) ? owner : currentShapeIdx;
 
-    vec4 tp = uTouches[i];
-    float d = length(pPx - tp.xy);
+    float sdOwner = sdShapeCoreAt(shapeIdx, pSdf);
+
+    float wAA     = max(fwidth(sdOwner), 1e-6) * GLOW_OWNER_FEATHER_PX;
+    float inShape = smoothstep(0.0, wAA, -sdOwner);
+    if (inShape <= 1e-5) continue;
+
+    vec4  tp    = uTouches[i];              // (x_px, y_px, r_px, fade_px)
+    float d     = length(pPx - tp.xy);
     float inner = tp.z;
     float outer = tp.z + max(tp.w, 1e-3);
-    float mi = smoothstep(outer, inner, d);
+    float radial = smoothstep(outer, inner, d);
 
-    // per-Touch Glow-Multiplikator (0..1)
     float s = clamp(uTouchGlowStrengths[i], 0.0, 1.0);
-    mi *= s;
 
-    m = max(m, mi);
+    outMask = max(outMask, radial * inShape * s);
   }
-  return m * inMask;
+  return outMask;
 }
 
 // schneller 2D-Gaussian-Approx (9 Samples) um *zusätzlichen* lokalen Blur zu simulieren
 vec4 gaussianApprox9(sampler2D tex, vec2 uv, float sigmaPx, vec2 sizePx){
   if (sigmaPx <= 0.01) return texScreen(tex, uv);
-  // einfache, isotrope 3x3-Gewichtung
   vec2 px = 1.0 / sizePx;
   float s = clamp(sigmaPx, 0.0, 6.0);
-  // Gewichte grob normalisiert
+
   float w0 = 0.227027; // center
   float w1 = 0.194594;
   float w2 = 0.121621;
@@ -420,7 +473,6 @@ vec4 gaussianApprox9(sampler2D tex, vec2 uv, float sigmaPx, vec2 sizePx){
   c += texScreen(tex, uv + vec2(px.x, -px.y)) * w2;
   c += texScreen(tex, uv + vec2(-px.x, -px.y)) * w2;
 
-  // skaliere Effizienz grob mit sigma (linearer Mix mit original)
   float t = clamp((s - 1.0) / 5.0, 0.0, 1.0);
   return mix(texScreen(tex, uv), c, t);
 }
@@ -435,7 +487,7 @@ vec4 renderLiquidGlass(
   vec4  glassColor, vec2 lightDirection, float lightIntensity, float ambientStrength,
   sampler2D backgroundTexture, vec3 normal, float foregroundAlpha,
   float saturation, float lightness, float rimWidthPx, float rimSharpness,
-  int   currentShapeIdx // <- NEU: aktiver Shape-Index dieses Pixels
+  int   currentShapeIdx
 ){
   vec4 backgroundColor = texScreen(backgroundTexture, screenUV);
   if (foregroundAlpha < 0.001) return backgroundColor;
@@ -471,58 +523,49 @@ vec4 renderLiquidGlass(
   float gTintMode  = uGlowParams.z;
   float gInside    = uGlowParams.w;
 
-  // Flags & Override-Werte
   float hasL = uGlowFlags.x;
   float hasS = uGlowFlags.y;
   float hasB = uGlowFlags.z;
   float hasG = uGlowFlags.w;
 
-  float oLight = uGlowOverrides.x;   // Ziel-Lightness
-  float oSatu  = uGlowOverrides.y;   // Ziel-Saturation
-  float oBlur  = uGlowOverrides.z;   // Ziel-Blur (Sigma px)
-  float oMix   = clamp(uGlowOverrides.w, 0.0, 1.0); // Max-Blend (GlowStyle.mix)
+  float oLight = uGlowOverrides.x;
+  float oSatu  = uGlowOverrides.y;
+  float oBlur  = uGlowOverrides.z;
+  float oMix   = clamp(uGlowOverrides.w, 0.0, 1.0);
 
-  vec2 uvBase = screenUV + refractionDisplacement; // Basis-UV nach Refraction
+  vec2 uvBase = screenUV + refractionDisplacement;
 
   vec4 outColor = coloredBase;
 
   if (gStrength > 0.0001 && uTouchCount_f > 0.5){
-    vec2 pPx = screenUV * uSizePx;
-    float maskRaw = glowTouchMask(pPx, gInside, sd, currentShapeIdx);
+    vec2 pPx = screenUV * uSizePx; // Pixelkoords (für uTouches)
+    float maskRaw = glowTouchMask(pPx, p, gInside, sd, currentShapeIdx);
     if (maskRaw > 0.0){
-      // Mask shaping: power & strength & mix
       float shaped = pow(clamp(maskRaw, 0.0, 1.0), gPower) * gStrength * oMix;
       shaped = clamp(shaped, 0.0, 1.0);
 
-      // Ziel-Parameter bestimmen (fallback auf global)
       float tLight = (hasL > 0.5) ? oLight : lightness;
       float tSatu  = (hasS > 0.5) ? oSatu  : saturation;
-      vec4 tGlass  = (hasG > 0.5) ? uGlowGlass : glassColor;
+      vec4  tGlass = (hasG > 0.5) ? uGlowGlass : glassColor;
 
-      // Parametrischer Mix zwischen globalen Parametern und Zielwerten.
       float effLight = mix(lightness, tLight, shaped);
       float effSatu  = mix(saturation, tSatu, shaped);
       vec4  effGlass = mix(glassColor, tGlass, shaped);
 
-      // Optionaler lokaler Zusatz-Blur über dem globalen Blur
       float extraSigma = 0.0;
       if (hasB > 0.5) {
-        // oBlur ist "Ziel-Gesamtblur": ziehe den globalen ab → Extra
-        extraSigma = max(oBlur - uGlobalBlurSigma, 0.0); // uGlobalBlurSigma = Basis-Sigma (Host setzen!)
+        extraSigma = max(oBlur - uGlobalBlurSigma, 0.0);
       }
 
-      // Ausgangs-Refraktfarbe ggf. lokal stärker blur’en
       vec4 refractLocal = refractColorBase;
       if (extraSigma > 0.01){
         refractLocal = gaussianApprox9(backgroundTexture, uvBase, extraSigma, uSize);
       }
 
-      // Re-Coloring mit effektiven Parametern
       vec4 coloredLocal = applyGlassColor(refractLocal, effGlass);
       coloredLocal.rgb += lighting;
       coloredLocal.rgb  = applySaturationLightness(coloredLocal.rgb, effSatu, effLight);
 
-      // Zusatz-Tint gemäß tintMode (white / background / fixed uGlowColor)
       vec3 tint;
       if (gTintMode < 0.5) {
         tint = vec3(1.0);
@@ -534,12 +577,10 @@ vec4 renderLiquidGlass(
       vec4 tintGlass = vec4(tint, clamp(uGlowColor.a, 0.0, 1.0) * shaped);
       coloredLocal = applyGlassColor(coloredLocal, tintGlass);
 
-      // In die Basisausgabe einblenden
       outColor = mix(coloredBase, coloredLocal, shaped);
     }
   }
 
-  // Rand-Alpha leicht anheben
   RimMasks rm = rimMasksInner(sd, rimWidthPx, rimSharpness);
   float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPx/64.0, 0.0, 1.0));
   float mixA = clamp(max(foregroundAlpha, rm.band * edgeAlphaGain), 0.0, 1.0);
