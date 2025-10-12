@@ -155,7 +155,7 @@ vec3 _diagnosticColor(int idx){
 // ───────────────────── Main ────────────────────────────────────────────────
 void main(){
   // Device-space Pixel +0.5 (wie im Main-Pass)
-  vec2 pScreen = FlutterFragCoord().xy + vec2(0.5);
+  vec2 pScreen = FlutterFragCoord().xy;
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
   vec2 uv = pScreen * invSize;
 

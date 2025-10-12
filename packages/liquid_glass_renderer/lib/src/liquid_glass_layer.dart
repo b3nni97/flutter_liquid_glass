@@ -715,9 +715,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   /// Snap a rectangle to device pixels to avoid half-pixel sampling seams.
   Rect _snapRectToDeviceFull(Rect r) {
     final d = _devicePixelRatio;
-    double s(double v) => (v * d).roundToDouble() / d;
-    final l = s(r.left), t = s(r.top), rr = s(r.right), bb = s(r.bottom);
-    return Rect.fromLTRB(l, t, rr, bb);
+    double f(double v) => (v * d).floorToDouble() / d;
+    double c(double v) => (v * d).ceilToDouble() / d;
+    return Rect.fromLTRB(f(r.left), f(r.top), c(r.right), c(r.bottom));
   }
 
   Path _computeUnionClipPath(

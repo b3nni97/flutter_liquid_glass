@@ -142,7 +142,7 @@ vec3 getNormal(float sd, float thickness, int idx){
 }
 
 void main(){
-  vec2 pScreen = FlutterFragCoord().xy + vec2(0.5);
+  vec2 pScreen = FlutterFragCoord().xy;
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
   vec2 screenUV = pScreen * invSize;
 
