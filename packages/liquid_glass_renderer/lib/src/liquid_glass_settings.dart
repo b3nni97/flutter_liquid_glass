@@ -1,6 +1,6 @@
 // liquid_glass_settings.dart
 import 'dart:math' show pi;
-import 'dart:ui';
+import 'dart:ui'; // Benötigt für lerpDouble
 
 import 'package:equatable/equatable.dart';
 
@@ -71,6 +71,47 @@ class GlowStyle with EquatableMixin {
     );
   }
 
+  // ────────────────────────────────────────────────────────────────────────
+  // NEU: Statische Lerp-Funktion für Animationen
+  // ────────────────────────────────────────────────────────────────────────
+
+  /// Interpoliert linear zwischen zwei [GlowStyle]-Objekten.
+  static GlowStyle lerp(GlowStyle? a, GlowStyle? b, double t) {
+    // Standardwerte verwenden, falls a oder b null sind, um Animationen
+    // von/zu null zu ermöglichen.
+    a ??= const GlowStyle();
+    b ??= const GlowStyle();
+
+    // Bools und Ints können nicht linear interpoliert werden.
+    // Wir wechseln sie, wenn die Animation zur Hälfte durch ist.
+    final bool useBoolsFromB = t >= 0.5;
+
+    return GlowStyle(
+      // Bools
+      enabled: useBoolsFromB ? b.enabled : a.enabled,
+      insideOnly: useBoolsFromB ? b.insideOnly : a.insideOnly,
+
+      // Ints
+      tintMode: useBoolsFromB ? b.tintMode : a.tintMode,
+
+      // Doubles (non-nullable)
+      mix: lerpDouble(a.mix, b.mix, t)!,
+      strength: lerpDouble(a.strength, b.strength, t)!,
+      power: lerpDouble(a.power, b.power, t)!,
+
+      // Doubles (nullable)
+      // lerpDouble behandelt null-Werte als 0.0, was für Animationen
+      // (z.B. von "kein Blur" zu "Blur: 10.0") meist das gewünschte Verhalten ist.
+      lightness: lerpDouble(a.lightness, b.lightness, t),
+      saturation: lerpDouble(a.saturation, b.saturation, t),
+      blur: lerpDouble(a.blur, b.blur, t),
+
+      // Colors
+      glassColor: Color.lerp(a.glassColor, b.glassColor, t),
+      color: Color.lerp(a.color, b.color, t)!,
+    );
+  }
+
   @override
   List<Object?> get props => [
         enabled,
@@ -112,21 +153,21 @@ class LiquidGlassSettings with EquatableMixin {
   });
 
   /// Convenience-Konstruktor im Figma-Stil (0..100 Skalen).
-  LiquidGlassSettings.figma({
-    required double refraction, // 0..100
-    required double depth, // => thickness
-    required double dispersion, // 0..100
-    required double frost, // => blur (Sigma)
-    double lightIntensity = 50, // 0..100
-    double lightAngle = 0.5 * pi,
-    double blend = 20,
-    Color glassColor = const Color.fromARGB(0, 255, 255, 255),
-    double rimWidthPx = 1.5,
-    double rimSharpness = 0.89,
+  LiquidGlassSettings.figma(
+      {required double refraction, // 0..100
+      required double depth, // => thickness
+      required double dispersion, // 0..100
+      required double frost, // => blur (Sigma)
+      double lightIntensity = 50, // 0..100
+      double lightAngle = 0.5 * pi,
+      double blend = 20,
+      Color glassColor = const Color.fromARGB(0, 255, 255, 255),
+      double rimWidthPx = 1.5,
+      double rimSharpness = 0.89,
 
-    // Optional direkt ein GlowStyle setzen
-    GlowStyle glow = const GlowStyle(),
-  }) : this(
+      // Optional direkt ein GlowStyle setzen
+      GlowStyle glow = const GlowStyle()})
+      : this(
           refractiveIndex: 1 + (refraction / 100) * 0.2,
           thickness: depth,
           chromaticAberration: 4 * (dispersion / 100),
@@ -220,6 +261,42 @@ class LiquidGlassSettings with EquatableMixin {
       rimWidthPx: rimWidthPx ?? this.rimWidthPx,
       rimSharpness: rimSharpness ?? this.rimSharpness,
       glow: glow ?? this.glow,
+    );
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // NEU: Statische Lerp-Funktion für Animationen
+  // ────────────────────────────────────────────────────────────────────────
+
+  /// Interpoliert linear zwischen zwei [LiquidGlassSettings]-Objekten.
+  static LiquidGlassSettings? lerp(
+      LiquidGlassSettings? a, LiquidGlassSettings? b, double t) {
+    // Standard-Tween-Verhalten: Wenn beide null sind, ist das Ergebnis null.
+    if (a == null && b == null) return null;
+
+    // Wenn eines null ist, blenden wir ein oder aus.
+    // Wir verwenden einen Standardwert (leere Settings) für die Animation.
+    a ??= const LiquidGlassSettings();
+    b ??= const LiquidGlassSettings();
+
+    return LiquidGlassSettings(
+      glassColor: Color.lerp(a.glassColor, b.glassColor, t)!,
+      thickness: lerpDouble(a.thickness, b.thickness, t)!,
+      blur: lerpDouble(a.blur, b.blur, t)!,
+      chromaticAberration:
+          lerpDouble(a.chromaticAberration, b.chromaticAberration, t)!,
+      blend: lerpDouble(a.blend, b.blend, t)!,
+      lightAngle: lerpDouble(a.lightAngle, b.lightAngle, t)!,
+      lightIntensity: lerpDouble(a.lightIntensity, b.lightIntensity, t)!,
+      ambientStrength: lerpDouble(a.ambientStrength, b.ambientStrength, t)!,
+      refractiveIndex: lerpDouble(a.refractiveIndex, b.refractiveIndex, t)!,
+      saturation: lerpDouble(a.saturation, b.saturation, t)!,
+      lightness: lerpDouble(a.lightness, b.lightness, t)!,
+      rimWidthPx: lerpDouble(a.rimWidthPx, b.rimWidthPx, t)!,
+      rimSharpness: lerpDouble(a.rimSharpness, b.rimSharpness, t)!,
+
+      // Hier rufen wir die statische lerp-Funktion von GlowStyle auf
+      glow: GlowStyle.lerp(a.glow, b.glow, t),
     );
   }
 
