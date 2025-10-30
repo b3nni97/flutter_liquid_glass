@@ -71,6 +71,9 @@ layout(location = 330) uniform float uGlobalBlurSigma;
 // NEU: per-touch Glow-Multiplikatoren (0..1)
 layout(location = 331) uniform float uTouchGlowStrengths[MAX_TOUCHES];
 
+// ✨ NEU: Skalierung des Hintergrunds innerhalb der Shapes
+layout(location = 339) uniform float uBgScale;
+
 // ───────────────────── Textures / Output ───────────────────────────────────
 uniform sampler2D uBackgroundTexture;
 layout(location = 0) out vec4 fragColor;
@@ -165,16 +168,25 @@ void main(){
     return;
   }
 
+  // ✨ Hintergrund-UV relativ zum Shape-Zentrum skalieren (nur im Shape aktiv)
+  float s = max(uBgScale, 1e-4);
+  vec2 centerUV = vec2(uShapeData[idx*6 + 1], uShapeData[idx*6 + 2]) * invSize;
+#ifdef IMPELLER_TARGET_OPENGLES
+  centerUV.y = 1.0 - centerUV.y;
+#endif
+  vec2 scaledUV = centerUV + (screenUV - centerUV) / s;
+
   vec3 normal = getNormal(sd, uThickness, idx);
 
   // Final shaded/refraction color – volle Logik (inkl. Glow/Overrides) liegt in shared.glsl
+  // ✨ Statt screenUV jetzt scaledUV übergeben
   fragColor = renderLiquidGlass(
-      screenUV, p, uSize,
+      scaledUV, p, uSize,
       sd, uThickness,
       uRefractiveIndex, uChromaticAberration,
       uGlassColor, uLightDirection, uLightIntensity, uAmbientStrength,
       uBackgroundTexture, normal, foregroundAlpha,
       uSaturation, uLightness, rimWidthPx, rimSharpness,
-      idx // <- NEU: aktiver Shape-Index für per-Shape Touch-Ownership
+      idx // <- aktiver Shape-Index für per-Shape Touch-Ownership
   );
 }

@@ -1,3 +1,4 @@
+// liquid_glass_layer.dart
 // ignore_for_file: avoid_setters_without_getters
 
 import 'dart:math' as math;
@@ -194,6 +195,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   // 393..396 : uGlowGlass (vec4)
   // 397      : uGlobalBlurSigma (float)
   // 398..405 : uTouchGlowStrengths[8] (8 * float)
+  // 406      : uBgScale (float)  ← ✨ neu
   static const int _idxGlassColor = 2;
   static const int _idxOpticalProps = 6;
   static const int _idxLightConfig = 10;
@@ -217,6 +219,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _idxGlowGlass = 393; // vec4
   static const int _idxGlobalBlurSigma = 397; // float
   static const int _idxTouchGlowStrengths = 398; // floats[8]
+
+  // ✨ Neu: Hintergrund-Skalierung (nur im Main-Pass genutzt)
+  static const int _idxBgScale = 406; // float
 
   static const double _eps = 0.01;
 
@@ -544,7 +549,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
         ..setFloat(_idxLightDir + 0, math.cos(_settings.lightAngle))
         ..setFloat(_idxLightDir + 1, math.sin(_settings.lightAngle))
         ..setFloat(_idxRimParams + 0, _settings.rimWidthPx)
-        ..setFloat(_idxRimParams + 1, _settings.rimSharpness);
+        ..setFloat(_idxRimParams + 1, _settings.rimSharpness)
+        // ✨ NEU: Skalierung des Hintergrunds im Shape
+        ..setFloat(_idxBgScale, _settings.backgroundScale);
 
       for (int i = 0; i < 16; i++) {
         _shader.setFloat(_idxTransform + i, _identityMat4[i]);
@@ -594,6 +601,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       _updateShapeCountIfNeeded(shapeCount);
       // H-Pass: nur die Shape-Anzahl (uColorAdjust.y) updaten.
       _blurH.setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
+      // Optional robust: bei reinen Settings-Änderungen ohne Equatable-Treffer:
+      // _shader.setFloat(_idxBgScale, _settings.backgroundScale);
     }
 
     // Horizontal pass (separate shader).
