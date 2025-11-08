@@ -195,7 +195,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   // 393..396 : uGlowGlass (vec4)
   // 397      : uGlobalBlurSigma (float)
   // 398..405 : uTouchGlowStrengths[8] (8 * float)
-  // 406      : uBgScale (float)  ← ✨ neu
+  // 406      : uBgScale (float)
+  // 407..408 : uNormalParams (vec2) -> plateauWidth, softness
   static const int _idxGlassColor = 2;
   static const int _idxOpticalProps = 6;
   static const int _idxLightConfig = 10;
@@ -220,8 +221,11 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _idxGlobalBlurSigma = 397; // float
   static const int _idxTouchGlowStrengths = 398; // floats[8]
 
-  // ✨ Neu: Hintergrund-Skalierung (nur im Main-Pass genutzt)
+  // Hintergrund-Skalierung (nur im Main-Pass genutzt)
   static const int _idxBgScale = 406; // float
+
+  // Parameter für Normalen/Abschrägung (vec2)
+  static const int _idxNormalParams = 407; // float
 
   static const double _eps = 0.01;
 
@@ -550,8 +554,11 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
         ..setFloat(_idxLightDir + 1, math.sin(_settings.lightAngle))
         ..setFloat(_idxRimParams + 0, _settings.rimWidthPx)
         ..setFloat(_idxRimParams + 1, _settings.rimSharpness)
-        // ✨ NEU: Skalierung des Hintergrunds im Shape
-        ..setFloat(_idxBgScale, _settings.backgroundScale);
+        // Skalierung des Hintergrunds im Shape
+        ..setFloat(_idxBgScale, _settings.backgroundScale)
+        // Normalen-Parameter
+        ..setFloat(_idxNormalParams + 0, _settings.normalPlateauWidth)
+        ..setFloat(_idxNormalParams + 1, _settings.normalSoftness);
 
       for (int i = 0; i < 16; i++) {
         _shader.setFloat(_idxTransform + i, _identityMat4[i]);
@@ -601,8 +608,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       _updateShapeCountIfNeeded(shapeCount);
       // H-Pass: nur die Shape-Anzahl (uColorAdjust.y) updaten.
       _blurH.setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
-      // Optional robust: bei reinen Settings-Änderungen ohne Equatable-Treffer:
-      // _shader.setFloat(_idxBgScale, _settings.backgroundScale);
     }
 
     // Horizontal pass (separate shader).

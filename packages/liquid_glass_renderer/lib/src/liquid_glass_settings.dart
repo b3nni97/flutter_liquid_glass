@@ -142,8 +142,12 @@ class LiquidGlassSettings with EquatableMixin {
     this.rimSharpness = 0.9,
     this.glow = const GlowStyle(),
 
-    // ✨ NEU: globaler Skalierungsfaktor für den Hintergrund im Shape
+    // globaler Skalierungsfaktor für den Hintergrund im Shape
     this.backgroundScale = 1.0,
+
+    // Parameter für die Normalen/Abschrägung
+    this.normalPlateauWidth = 24.0,
+    this.normalSoftness = 1.8,
   });
 
   /// Convenience-Konstruktor im Figma-Stil (0..100 Skalen).
@@ -159,6 +163,8 @@ class LiquidGlassSettings with EquatableMixin {
     double rimWidthPx = 1.5,
     double rimSharpness = 0.89,
     GlowStyle glow = const GlowStyle(),
+    // HINWEIS: normalPlateauWidth & normalSoftness
+    //    verwenden hier die Defaults aus dem Haupt-Konstruktor (24.0, 1.8)
   }) : this(
           refractiveIndex: 1 + (refraction / 100) * 0.2,
           thickness: depth,
@@ -175,6 +181,7 @@ class LiquidGlassSettings with EquatableMixin {
           rimSharpness: rimSharpness,
           glow: glow,
           // backgroundScale bleibt beim Default 1.0
+          // normalPlateauWidth & normalSoftness bleiben bei ihren Defaults
         );
 
   // ───────── Basis-/Default-Parameter (global) ─────────
@@ -221,9 +228,15 @@ class LiquidGlassSettings with EquatableMixin {
   /// Einziger dynamischer Overlay-/Hotspot-Stil (Glow + optionale Overrides).
   final GlowStyle glow;
 
-  /// ✨ Skalierung des durchscheinenden Hintergrunds innerhalb der Shapes.
+  /// Skalierung des durchscheinenden Hintergrunds innerhalb der Shapes.
   /// 1.0 = unverändert, >1 = Zoom-in, <1 = Zoom-out.
   final double backgroundScale;
+
+  /// Breite des Plateaus für die Normalen/Abschrägung (px).
+  final double normalPlateauWidth;
+
+  /// Weichheit/Exponent der Normalen-Kurve (Abschrägung).
+  final double normalSoftness;
 
   // ───────── Copy & Equatable ─────────
 
@@ -242,9 +255,9 @@ class LiquidGlassSettings with EquatableMixin {
     double? rimWidthPx,
     double? rimSharpness,
     GlowStyle? glow,
-
-    // ✨ NEU:
     double? backgroundScale,
+    double? normalPlateauWidth,
+    double? normalSoftness,
   }) {
     return LiquidGlassSettings(
       glassColor: glassColor ?? this.glassColor,
@@ -261,9 +274,9 @@ class LiquidGlassSettings with EquatableMixin {
       rimWidthPx: rimWidthPx ?? this.rimWidthPx,
       rimSharpness: rimSharpness ?? this.rimSharpness,
       glow: glow ?? this.glow,
-
-      // ✨ NEU:
       backgroundScale: backgroundScale ?? this.backgroundScale,
+      normalPlateauWidth: normalPlateauWidth ?? this.normalPlateauWidth,
+      normalSoftness: normalSoftness ?? this.normalSoftness,
     );
   }
 
@@ -296,8 +309,10 @@ class LiquidGlassSettings with EquatableMixin {
       // Glow via eigene Lerp
       glow: GlowStyle.lerp(a.glow, b.glow, t),
 
-      // ✨ NEU:
       backgroundScale: lerpDouble(a.backgroundScale, b.backgroundScale, t)!,
+      normalPlateauWidth:
+          lerpDouble(a.normalPlateauWidth, b.normalPlateauWidth, t)!,
+      normalSoftness: lerpDouble(a.normalSoftness, b.normalSoftness, t)!,
     );
   }
 
@@ -317,6 +332,8 @@ class LiquidGlassSettings with EquatableMixin {
         rimWidthPx,
         rimSharpness,
         glow,
-        backgroundScale, // ✨ NEU
+        backgroundScale,
+        normalPlateauWidth,
+        normalSoftness,
       ];
 }

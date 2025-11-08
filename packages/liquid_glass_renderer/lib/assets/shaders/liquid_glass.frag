@@ -50,7 +50,7 @@ layout(location = 108) uniform vec4 u_samples[50];
 layout(location = 308) uniform float uTouchCount_f;
 // uTouches[i] = (x_px, y_px, radius_px, fade_px)
 layout(location = 309) uniform vec4  uTouches[MAX_TOUCHES];
-// NEU: pro-Touch Owner-Index (-1 = global, sonst Shape-Index)
+// pro-Touch Owner-Index (-1 = global, sonst Shape-Index)
 layout(location = 317) uniform float uTouchOwners[MAX_TOUCHES];
 
 // Glow: x=strength, y=power, z=tintMode(0=weiß,1=hintergrund,2=festeFarbe), w=insideOnly(0/1)
@@ -58,7 +58,7 @@ layout(location = 325) uniform vec4 uGlowParams;
 // Optional (nur wenn tintMode==2) – A enthält hier die Tint-Intensität
 layout(location = 326) uniform vec4 uGlowColor;
 
-// ──────── NEU: Overrides aus GlowStyle (passen zu shared.glsl) ─────────────
+// ──────── Overrides aus GlowStyle (passen zu shared.glsl) ─────────────
 // (lightness, saturation, blurSigmaPx, mix)
 layout(location = 327) uniform vec4 uGlowOverrides;
 // (hasLightness, hasSaturation, hasBlur, hasGlassColor) → 0.0/1.0
@@ -68,11 +68,15 @@ layout(location = 329) uniform vec4 uGlowGlass;
 // globaler Basis-Blur (Sigma, px) – wird für Delta-Blur in shared.glsl genutzt
 layout(location = 330) uniform float uGlobalBlurSigma;
 
-// NEU: per-touch Glow-Multiplikatoren (0..1)
+// per-touch Glow-Multiplikatoren (0..1)
 layout(location = 331) uniform float uTouchGlowStrengths[MAX_TOUCHES];
 
-// ✨ NEU: Skalierung des Hintergrunds innerhalb der Shapes
+// Skalierung des Hintergrunds innerhalb der Shapes
 layout(location = 339) uniform float uBgScale;
+
+// Parameter für die Normalen/Abschrägung (Bevel)
+// x = plateauWidth, y = softness
+layout(location = 340) uniform vec2 uNormalParams;
 
 // ───────────────────── Textures / Output ───────────────────────────────────
 uniform sampler2D uBackgroundTexture;
@@ -95,9 +99,13 @@ float uNumShapes           = uColorAdjust.y;
 float rimWidthPx           = uRimParams.x;
 float rimSharpness         = uRimParams.y;
 
+// Aliase für Normalen-Parameter
+float uNormalPlateauWidth  = uNormalParams.x;
+float uNormalSoftness      = uNormalParams.y;
+
 // ───────────────────── Include shared helpers *after* uniforms ─────────────
 #include "shared.glsl"
-// ↓↓↓ NEU: SDF/Smooth-Union + sceneSDF aus ausgelagerter Library
+// SDF/Smooth-Union + sceneSDF aus ausgelagerter Library
 #include "lg_union_sdf.glsl"
 
 // ============================================================================
@@ -132,8 +140,8 @@ vec3 getNormal(float sd, float thickness, int idx){
   float dy = dFdy(sd);
 
   // Tuned values from your final configuration for the desired look.
-  const float plateauWidth = 24.0;
-  const float softness = 1.8;
+  float plateauWidth = uNormalPlateauWidth;
+  float softness     = uNormalSoftness;
 
   // Calculate the normal's curvature with a central plateau.
   float fullRange = thickness + plateauWidth;
@@ -146,6 +154,7 @@ vec3 getNormal(float sd, float thickness, int idx){
 
 void main(){
   vec2 pScreen = FlutterFragCoord().xy;
+  // KORRIGIERT: vec2(1.GET_NORMAL0) zu vec2(1.0) geändert
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
   vec2 screenUV = pScreen * invSize;
 
@@ -168,7 +177,7 @@ void main(){
     return;
   }
 
-  // ✨ Hintergrund-UV relativ zum Shape-Zentrum skalieren (nur im Shape aktiv)
+  // Hintergrund-UV relativ zum Shape-Zentrum skalieren (nur im Shape aktiv)
   float s = max(uBgScale, 1e-4);
   vec2 centerUV = vec2(uShapeData[idx*6 + 1], uShapeData[idx*6 + 2]) * invSize;
 #ifdef IMPELLER_TARGET_OPENGLES
@@ -179,7 +188,7 @@ void main(){
   vec3 normal = getNormal(sd, uThickness, idx);
 
   // Final shaded/refraction color – volle Logik (inkl. Glow/Overrides) liegt in shared.glsl
-  // ✨ Statt screenUV jetzt scaledUV übergeben
+  // Statt screenUV jetzt scaledUV übergeben
   fragColor = renderLiquidGlass(
       scaledUV, p, uSize,
       sd, uThickness,

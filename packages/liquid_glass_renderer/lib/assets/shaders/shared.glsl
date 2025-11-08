@@ -23,6 +23,27 @@
 #define LG_LOD_BIAS_SCALE 0.75
 #endif
 
+// --- NEUES DEFINE FÜR CA OPACITY ---
+#ifndef LG_CA_OPACITY
+#define LG_CA_OPACITY 0.2 // Steuert die Deckkraft des CA-Effekts (0.0 - 1.0)
+#endif
+// --- ENDE NEUES DEFINE ---
+
+// --- NEUES DEFINE FÜR CA-QUALITÄT ---
+#ifndef LG_CA_QUALITY_SAMPLES
+#define LG_CA_QUALITY_SAMPLES 5 // 3 = Standard (R,G,B), 5 = High Quality (R,Y,G,C,B)
+#endif
+// --- ENDE NEUES DEFINE ---
+
+// --- NEUE DEFINES FÜR CA-VIBRANCY (HELLIGKEIT/SÄTTIGUNG) ---
+#ifndef LG_CA_LIGHTNESS_BOOST
+#define LG_CA_LIGHTNESS_BOOST 2 // (1.0 = keine Änderung)
+#endif
+#ifndef LG_CA_SATURATION_BOOST
+#define LG_CA_SATURATION_BOOST 1.5 // (1.0 = keine Änderung)
+#endif
+// --- ENDE NEUE DEFINES ---
+
 #ifndef LG_CA_PASS_MODE
 // 0 = both passes, 1 = vertical only (|u_dir_y| >= |u_dir_x|), 2 = horizontal only
 #define LG_CA_PASS_MODE 1
@@ -312,6 +333,7 @@ vec4 calculateRefraction(
   refractionDisplacement = dispPx / sizePx;
   vec2 uvBase = screenUV + refractionDisplacement;
 
+  // Zentrales Sample (Grün-Anker). Dies ist *immer* Sample 1.
   vec4 gS = applyGaussian1D_Impeller(backgroundTexture, uvBase);
 
   float ca = max(chromaticAberration, 0.0);
@@ -319,30 +341,85 @@ vec4 calculateRefraction(
   if (ca * dispLenPx < LG_CA_VIS_THRESHOLD || !_shouldApplyCA()) {
     return gS;
   }
+  
+  // --- ANGEPASSTE CA-LOGIK (basiert auf Qualitätsswitch) ---
+  vec2 invUSize = 1.0 / sizePx;
+  float dispersionStrength = chromaticAberration * 0.4;
 
-  vec2 dirUV = lg_norm2(refractionDisplacement + vec2(LG_EPS, LG_EPS));
-  float caPixels = clamp(dispLenPx * (1.5 * ca), 0.0, 6.0);
-  float shortSide = max(1.0, min(sizePx.x, sizePx.y));
-  vec2  caUV      = dirUV * (caPixels / shortSide);
+  // --- CA Opacity ---
+  float mixAmt = clamp(float(LG_CA_OPACITY), 0.0, 1.0);
+  vec3 finalColor; // Wird jetzt als vec3 deklariert
 
-  #if LG_USE_EXPLICIT_LOD
-    float lodBias = clamp(LG_LOD_BIAS_SCALE * caPixels / 2.0, 0.0, 3.5);
-    #define SAMPLE_GAUSS_AT(_uv) textureLod(backgroundTexture, clamp((_uv), vec2(0.0), vec2(1.0)), lodBias)
-  #else
-    #define SAMPLE_GAUSS_AT(_uv) applyGaussian1D_Impeller(backgroundTexture, (_uv))
-  #endif
 
-  float r = SAMPLE_GAUSS_AT(uvBase + caUV).r;
-  float b = SAMPLE_GAUSS_AT(uvBase - caUV).b;
+#if LG_CA_QUALITY_SAMPLES == 5
+  // ----- 5-Sample "High Quality" CA (Teuer: 5 blur samples total) -----
+  
+  // Offsets
+  vec2 disp_R  = dispPx * (1.0 + dispersionStrength) * invUSize;
+  vec2 disp_Y  = dispPx * (1.0 + dispersionStrength * 0.5) * invUSize;
+  // disp_G = gS (uvBase)
+  vec2 disp_C  = dispPx * (1.0 - dispersionStrength * 0.5) * invUSize;
+  vec2 disp_B  = dispPx * (1.0 - dispersionStrength) * invUSize;
 
-  #undef SAMPLE_GAUSS_AT
+  // Führe die 4 *zusätzlichen* (teuren) Blur-Samples durch
+  vec4 s_R = applyGaussian1D_Impeller(backgroundTexture, screenUV + disp_R);
+  vec4 s_Y = applyGaussian1D_Impeller(backgroundTexture, screenUV + disp_Y);
+  vec4 s_C = applyGaussian1D_Impeller(backgroundTexture, screenUV + disp_C);
+  vec4 s_B = applyGaussian1D_Impeller(backgroundTexture, screenUV + disp_B);
+  
+  // ----- KORRIGIERTE LOGIK v19 (Boost auf Differenz) -----
+  
+  // 1. Konstruiere die *reine* Spektralfarbe (v6 logic)
+  vec3 spectralColor;
+  spectralColor.r = (s_R.r * 0.5) + (s_Y.r * 0.5);
+  spectralColor.g = (s_Y.g * 0.5) + (s_C.g * 0.5);
+  spectralColor.b = (s_C.b * 0.5) + (s_B.b * 0.5);
+  
+  // 2. Berechne die *Differenz* (den reinen CA-Effekt)
+  vec3 diff = spectralColor - gS.rgb;
 
-  float mixAmt = clamp(ca, 0.0, 1.0);
-  float outR = mix(gS.r, r, mixAmt);
-  float outG = gS.g;
-  float outB = mix(gS.b, b, mixAmt);
+  // 3. Wende Boosts auf die *Differenz* an
+  // Helligkeit
+  diff *= float(LG_CA_LIGHTNESS_BOOST);
+  // Sättigung
+  float luminance = dot(diff, vec3(0.299, 0.587, 0.114));
+  diff = mix(vec3(luminance), diff, float(LG_CA_SATURATION_BOOST));
+  
+  // 4. Wende die geboostete Differenz (skaliert mit Opacity) auf die Basisfarbe an
+  finalColor = gS.rgb + (diff * mixAmt);
+  
+  // ----- ENDE KORREKTUR v19 -----
 
-  return vec4(outR, outG, outB, gS.a);
+#else
+  // ----- 3-Sample "Standard" CA (Standard: 3 blur samples total) -----
+  vec2 redOffset = dispPx * (1.0 + dispersionStrength);
+  vec2 blueOffset = dispPx * (1.0 - dispersionStrength);
+
+  vec2 redUV = screenUV + redOffset * invUSize;
+  vec2 blueUV = screenUV + blueOffset * invUSize;
+
+  // Führe die 2 *zusätzlichen* (teuren) Blur-Samples durch
+  float red = applyGaussian1D_Impeller(backgroundTexture, redUV).r;
+  float blue = applyGaussian1D_Impeller(backgroundTexture, blueUV).b;
+
+  // Konstruiere die Spektralfarbe
+  vec3 spectralColor = vec3(red, gS.g, blue); // G bleibt fix
+  
+  // 2. Berechne die *Differenz* (den reinen CA-Effekt)
+  vec3 diff = spectralColor - gS.rgb;
+  
+  // 3. Wende Boosts auf die *Differenz* an
+  diff *= float(LG_CA_LIGHTNESS_BOOST);
+  float luminance = dot(diff, vec3(0.299, 0.587, 0.114));
+  diff = mix(vec3(luminance), diff, float(LG_CA_SATURATION_BOOST));
+
+  // 4. Wende die geboostete Differenz (skaliert mit Opacity) auf die Basisfarbe an
+  finalColor = gS.rgb + (diff * mixAmt);
+#endif
+
+  // Clamp am Ende, um Überstrahlen zu verhindern
+  return vec4(clamp(finalColor, 0.0, 1.0), gS.a);
+  // --- ENDE DER ÄNDERUNG ---
 }
 
 // ────────────────────────────────────────────────────────────────────────────
