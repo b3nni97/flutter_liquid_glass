@@ -1,4 +1,4 @@
-// liquid_glass.frag — Packed locations; blur uniforms moved after uShapeData (106/107)
+// liquid_glass.frag — Liquid-Glass mit Kotlin-AA & -Normals (UNION-safe); CA/Dispersion in shared.glsl
 #version 320 es
 
 precision mediump float;
@@ -7,88 +7,56 @@ precision mediump int;
 #include <flutter/runtime_effect.glsl>
 
 // ───────────────────── Packed header (fixed locations) ─────────────────────
-// Set by Flutter: logical device size in device pixels (width, height).
 layout(location = 0) uniform vec2 uSize;
-// RGBA tint applied to the glass.
 layout(location = 1) uniform vec4 uGlassColor;
-// Optical properties: refractive index (RI), chromatic aberration (CA),
-// effective thickness (px), and blend factor for shape unions.
+// uOpticalProps = (RI, CA, thickness, blend)
 layout(location = 2) uniform vec4 uOpticalProps;
-// Lighting configuration: light angle (rad), intensity, ambient strength,
-// and color saturation multiplier.
+// uLightConfig = (angle, intensity, ambient, saturation)
 layout(location = 3) uniform vec4 uLightConfig;
-// Color adjustments: lightness and number of shapes (as float).
+// uColorAdjust = (lightness, numShapes)
 layout(location = 4) uniform vec2 uColorAdjust;
-// Precomputed light direction: cos(angle), sin(angle).
+// vorcomputete Lichtrichtung: (cos, sin)
 layout(location = 5) uniform vec2 uLightDirection;
-// Transform applied to FragCoord before SDF evaluation.
+// Transform vor SDF
 layout(location = 6) uniform mat4 uTransform;
-// Rim configuration: rim width and rim sharpness.
+// Rim: (widthPx, sharpness)
 layout(location = 10) uniform vec2 uRimParams;
 
 // ───────────────────── Shapes (max 16; fixed location) ─────────────────────
 #define MAX_SHAPES 16
 layout(location = 11) uniform float uShapeData[MAX_SHAPES * 6];
-// Layout per shape: (type, centerX, centerY, sizeW, sizeH, cornerRadius)
-// Consumes 96 floats for 16 shapes → locations 11..106
 
-// ───────────────────── Blur uniforms (after uShapeData) ────────────────────
-// Next free location is 106
+// ───────────────────── Blur uniforms (unchanged) ───────────────────────────
 layout(location = 107) uniform vec4 uBlurHeader;
-// x=u_dir_x, y=u_dir_y, z=u_sample_count, w=u_tile_mode
-#define u_dir_x        (uBlurHeader.x)
-#define u_dir_y        (uBlurHeader.y)
-#define u_sample_count (uBlurHeader.z)
-#define u_tile_mode    (uBlurHeader.w)
-
-// Samples start at 108 (50 * vec4 → locations 108..307)
 layout(location = 108) uniform vec4 u_samples[50];
 
-// ───────────────────── Touch / Glow (after samples; fixed) ─────────────────
+// ───────────────────── Touch / Glow (unchanged) ────────────────────────────
 #define MAX_TOUCHES 8
-// float-Count (wird zu int gecastet)
 layout(location = 308) uniform float uTouchCount_f;
-// uTouches[i] = (x_px, y_px, radius_px, fade_px)
 layout(location = 309) uniform vec4  uTouches[MAX_TOUCHES];
-// pro-Touch Owner-Index (-1 = global, sonst Shape-Index)
 layout(location = 317) uniform float uTouchOwners[MAX_TOUCHES];
 
-// Glow: x=strength, y=power, z=tintMode(0=weiß,1=hintergrund,2=festeFarbe), w=insideOnly(0/1)
 layout(location = 325) uniform vec4 uGlowParams;
-// Optional (nur wenn tintMode==2) – A enthält hier die Tint-Intensität
 layout(location = 326) uniform vec4 uGlowColor;
-
-// ──────── Overrides aus GlowStyle (passen zu shared.glsl) ─────────────
-// (lightness, saturation, blurSigmaPx, mix)
 layout(location = 327) uniform vec4 uGlowOverrides;
-// (hasLightness, hasSaturation, hasBlur, hasGlassColor) → 0.0/1.0
 layout(location = 328) uniform vec4 uGlowFlags;
-// lokale Glasfarbe für den Glow-Bereich
 layout(location = 329) uniform vec4 uGlowGlass;
-// globaler Basis-Blur (Sigma, px) – wird für Delta-Blur in shared.glsl genutzt
 layout(location = 330) uniform float uGlobalBlurSigma;
-
-// per-touch Glow-Multiplikatoren (0..1)
 layout(location = 331) uniform float uTouchGlowStrengths[MAX_TOUCHES];
 
-// Skalierung des Hintergrunds innerhalb der Shapes
 layout(location = 339) uniform float uBgScale;
-
-// Parameter für die Normalen/Abschrägung (Bevel)
-// x = plateauWidth, y = softness
-layout(location = 340) uniform vec2 uNormalParams;
+layout(location = 340) uniform vec2  uNormalParams;
 
 // ───────────────────── Textures / Output ───────────────────────────────────
 uniform sampler2D uBackgroundTexture;
 layout(location = 0) out vec4 fragColor;
 
-// ───────────────────── Aliases extracted from packed vectors ───────────────
+// ───────────────────── Aliases ─────────────────────────────────────────────
 float uRefractiveIndex     = uOpticalProps.x;
 float uChromaticAberration = uOpticalProps.y;
 float uThickness           = uOpticalProps.z;
 float uBlend               = uOpticalProps.w;
 
-float uLightAngle          = uLightConfig.x;
 float uLightIntensity      = uLightConfig.y;
 float uAmbientStrength     = uLightConfig.z;
 float uSaturation          = uLightConfig.w;
@@ -99,85 +67,64 @@ float uNumShapes           = uColorAdjust.y;
 float rimWidthPx           = uRimParams.x;
 float rimSharpness         = uRimParams.y;
 
-// Aliase für Normalen-Parameter
+// Z-Krümmung: Tunable Soft (wie bei dir)
 float uNormalPlateauWidth  = uNormalParams.x;
 float uNormalSoftness      = uNormalParams.y;
 
-// ───────────────────── Include shared helpers *after* uniforms ─────────────
+// ───────────────────── Includes ────────────────────────────────────────────
 #include "shared.glsl"
-// SDF/Smooth-Union + sceneSDF aus ausgelagerter Library
 #include "lg_union_sdf.glsl"
 
-// ============================================================================
-// Small performance-related defines
-// ============================================================================
-#ifndef UNION_EXTRA_PX
-#define UNION_EXTRA_PX 2.0
+// ───────────────────── Kotlin-Style: AA & Union-Normals ────────────────────
+#ifndef AGSL_AA_WIDTH_PX
+#define AGSL_AA_WIDTH_PX 1.0
 #endif
 
-#ifdef NORMAL_MODE
-#undef NORMAL_MODE
-#endif
-#define NORMAL_MODE 0
-
-// Fast normalizers (avoid sqrt where possible).
-vec2 fastNormalize2(vec2 v){
-  float d = max(dot(v, v), LG_EPS);
-  return v * inversesqrt(d);
-}
-vec3 fastNormalize3(vec3 v){
-  float d = max(dot(v, v), LG_EPS);
-  return v * inversesqrt(d);
+// Unnormalisierter Union-Gradient (wie „alt“), aber auf sdUnion
+vec2 _unionGrad2_df(float sdUnion){
+  // kein Vor-Normalisieren! |∇sdUnion| trägt die weiche Dämpfung im Blend.
+  return vec2(dFdx(sdUnion), dFdy(sdUnion));
 }
 
-// ============================================================================
-// Normals — fast path
-// ============================================================================
-// MODIFIED: Replaced heuristic logic with the blend-safe "Tunable Soft" method.
-vec3 getNormal(float sd, float thickness, int idx){
-  // This version is safe for smooth unions and produces a soft, adjustable curve.
-  float dx = dFdx(sd);
-  float dy = dFdy(sd);
-
-  // Tuned values from your final configuration for the desired look.
+// 3D-Normale: XY aus *unnormalisiertem* ∇sdUnion; Z via Tunable-Soft
+vec3 _buildNormal3_fromUnion(float sdUnion, vec2 grad2){
   float plateauWidth = uNormalPlateauWidth;
   float softness     = uNormalSoftness;
+  float fullRange    = uThickness + plateauWidth;
+  float t            = max(fullRange + sdUnion, 0.0) / max(fullRange, 1e-6);
+  float n_cos        = pow(t, softness);
+  float n_sin        = sqrt(max(0.0, 1.0 - n_cos * n_cos));
 
-  // Calculate the normal's curvature with a central plateau.
-  float fullRange = thickness + plateauWidth;
-  float t = max(fullRange + sd, 0.0) / max(fullRange, 1e-6);
-  float n_cos = pow(t, softness);
-  float n_sin = sqrt(max(0.0, 1.0 - n_cos * n_cos));
-  
-  return normalize(vec3(dx * n_cos, dy * n_cos, n_sin));
+  // wie „alt“: erst am Ende 3D-normalisieren (behält |∇sd| als XY-Gewicht)
+  return normalize(vec3(grad2 * n_cos, n_sin));
 }
 
 void main(){
+  // Screen-Koords + UV (Impeller GLES-Flip)
   vec2 pScreen = FlutterFragCoord().xy;
-  // KORRIGIERT: vec2(1.GET_NORMAL0) zu vec2(1.0) geändert
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
   vec2 screenUV = pScreen * invSize;
-
 #ifdef IMPELLER_TARGET_OPENGLES
-  // OpenGLES uses inverted Y; flip to match texture space.
   screenUV.y = 1.0 - screenUV.y;
 #endif
 
-  // Transform the coordinate space before SDF evaluation.
+  // Transformierte SDF-Koords
   vec4 transformedCoord = uTransform * vec4(pScreen, 0.0, 1.0);
   vec2 p = transformedCoord.xy;
 
+  // UNION-SDF + aktiver Index
   int   idx;
-  float sd  = sceneSDF_withIndex_fast(p, idx);
+  float sdUnion = sceneSDF_withIndex_fast(p, idx);
 
-  // Foreground matte coverage from signed distance.
-  float foregroundAlpha = 1.0 - smoothstep(-2.0, 0.0, sd);
+  // Kotlin-AA (~1px) auf Union-SDF
+  float foregroundAlpha = smoothstep(0.0, AGSL_AA_WIDTH_PX,
+                                     clamp(-sdUnion, 0.0, AGSL_AA_WIDTH_PX));
   if (foregroundAlpha < 0.01){
     fragColor = texScreen(uBackgroundTexture, screenUV);
     return;
   }
 
-  // Hintergrund-UV relativ zum Shape-Zentrum skalieren (nur im Shape aktiv)
+  // Hintergrund-UV relativ zum Shape-Zentrum skalieren
   float s = max(uBgScale, 1e-4);
   vec2 centerUV = vec2(uShapeData[idx*6 + 1], uShapeData[idx*6 + 2]) * invSize;
 #ifdef IMPELLER_TARGET_OPENGLES
@@ -185,17 +132,18 @@ void main(){
 #endif
   vec2 scaledUV = centerUV + (screenUV - centerUV) / s;
 
-  vec3 normal = getNormal(sd, uThickness, idx);
+  // Normale: unnormalisierter Union-Gradient wie „alt“
+  vec2 grad2 = _unionGrad2_df(sdUnion);
+  vec3 normal = _buildNormal3_fromUnion(sdUnion, grad2);
 
-  // Final shaded/refraction color – volle Logik (inkl. Glow/Overrides) liegt in shared.glsl
-  // Statt screenUV jetzt scaledUV übergeben
+  // Liquid-Glass-Pipeline (Dispersion/CA im shared.glsl)
   fragColor = renderLiquidGlass(
       scaledUV, p, uSize,
-      sd, uThickness,
+      sdUnion, uThickness,
       uRefractiveIndex, uChromaticAberration,
       uGlassColor, uLightDirection, uLightIntensity, uAmbientStrength,
       uBackgroundTexture, normal, foregroundAlpha,
       uSaturation, uLightness, rimWidthPx, rimSharpness,
-      idx // <- aktiver Shape-Index für per-Shape Touch-Ownership
+      idx
   );
 }
