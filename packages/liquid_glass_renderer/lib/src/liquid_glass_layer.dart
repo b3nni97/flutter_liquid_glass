@@ -521,6 +521,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     int nKernel,
     List<_PackedS> kernel,
     List<_OwnedTouch> ownedTouches,
+    Rect bounds, // ← NEU
+    Offset offset, // ← NEU
   ) {
     final settingsChanged = _lastSettings != _settings;
     final shapesChanged = _shapesChanged(shapes);
@@ -533,6 +535,16 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
           .reduce((a, b) => a < b ? a : b);
       thickness = math.min(thickness, smallest);
     }
+
+    // --- Transform für Screen → SDF (global) ---
+    final double dpr = _devicePixelRatio;
+    final double theoreticalGlobalLeft = offset.dx + bounds.left;
+    final double theoreticalGlobalTop = offset.dy + bounds.top;
+    final double actualGlobalLeft = math.max(0.0, theoreticalGlobalLeft);
+    final double actualGlobalTop = math.max(0.0, theoreticalGlobalTop);
+    final double tx = actualGlobalLeft * dpr;
+    final double ty = actualGlobalTop * dpr;
+    final Matrix4 transform = Matrix4.translationValues(tx, ty, 0);
 
     if (settingsChanged || shapesChanged) {
       _shader
@@ -560,8 +572,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
         ..setFloat(_idxNormalParams + 0, _settings.normalPlateauWidth)
         ..setFloat(_idxNormalParams + 1, _settings.normalSoftness);
 
+      // uTransform (Screen → SDF): Translation in Device-Pixeln
       for (int i = 0; i < 16; i++) {
-        _shader.setFloat(_idxTransform + i, _identityMat4[i]);
+        _shader.setFloat(_idxTransform + i, transform.storage[i]);
       }
 
       for (var i = 0; i < shapeCount; i++) {
@@ -587,7 +600,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
         ..setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
 
       for (int i = 0; i < 16; i++) {
-        _blurH.setFloat(_idxTransform + i, _identityMat4[i]);
+        _blurH.setFloat(_idxTransform + i, transform.storage[i]);
       }
 
       for (var i = 0; i < shapeCount; i++) {
@@ -608,6 +621,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       _updateShapeCountIfNeeded(shapeCount);
       // H-Pass: nur die Shape-Anzahl (uColorAdjust.y) updaten.
       _blurH.setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
+
+      // Transform kann sich durch Offset/Bounds trotzdem ändern → nachziehen.
+      for (int i = 0; i < 16; i++) {
+        _shader.setFloat(_idxTransform + i, transform.storage[i]);
+        _blurH.setFloat(_idxTransform + i, transform.storage[i]);
+      }
     }
 
     // Horizontal pass (separate shader).
@@ -795,12 +814,21 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
     final ownedTouches = _combineTouches(shapes);
 
-    _uploadUniformsIfNeeded(shapeCount, shapes, nKernel, kernel, ownedTouches);
+    // Bounds werden vor Uniform-Upload berechnet und übergeben.
+    final Rect bounds = _snapRectToDeviceFull(_computeUnionClipRect(shapes));
+
+    _uploadUniformsIfNeeded(
+      shapeCount,
+      shapes,
+      nKernel,
+      kernel,
+      ownedTouches,
+      bounds,
+      offset,
+    );
 
     // ABOVE the glass first.
     _paintShapeContents(context, offset, shapes, glassContainsChild: true);
-
-    final Rect bounds = _snapRectToDeviceFull(_computeUnionClipRect(shapes));
 
     context.pushClipRect(
       true,
@@ -808,19 +836,19 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       bounds,
       (ctxRect, offRect) {
         // ---------- PASS 1: Horizontal blur ----------
-        if (sigmaPx > 0.0 && nKernel > 0) {
-          final BackdropFilterLayer hLayer =
-              _hHandle.layer ?? BackdropFilterLayer();
-          hLayer..filter = ImageFilter.shader(_blurH);
+        // if (sigmaPx > 0.0 && nKernel > 0) {
+        //   final BackdropFilterLayer hLayer =
+        //       _hHandle.layer ?? BackdropFilterLayer();
+        //   hLayer..filter = ImageFilter.shader(_blurH);
 
-          ctxRect.pushLayer(hLayer, (c2, o2) {
-            final paint = Paint()..color = const Color(0x01000000);
-            c2.canvas.drawRect(bounds.shift(-offRect), paint);
-          }, offRect);
-          _hHandle.layer = hLayer;
-        } else {
-          _hHandle.layer = null;
-        }
+        //   ctxRect.pushLayer(hLayer, (c2, o2) {
+        //     final paint = Paint()..color = const Color(0x01000000);
+        //     c2.canvas.drawRect(bounds.shift(-offRect), paint);
+        //   }, offRect);
+        //   _hHandle.layer = hLayer;
+        // } else {
+        //   _hHandle.layer = null;
+        // }
 
         // ---------- PASS 2: Vertical blur + glass ----------
         final int nV = (sigmaPx > 0.0) ? nKernel : 0;
@@ -851,6 +879,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
         ctxRect.pushLayer(vLayer, (c2, o2) {
           final paint = Paint()..color = const Color(0x01000000);
+
           c2.canvas.drawRect(bounds.shift(-offRect), paint);
         }, offRect);
         _vHandle.layer = vLayer;

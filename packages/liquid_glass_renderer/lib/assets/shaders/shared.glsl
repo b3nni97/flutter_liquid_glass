@@ -24,7 +24,7 @@
 #define LG_LOD_BIAS_SCALE 0.75
 #endif
 #ifndef LG_CA_OPACITY
-#define LG_CA_OPACITY 0.2 // Deckkraft des CA-Effekts (0.0 - 1.0)
+#define LG_CA_OPACITY 0.15 // Deckkraft des CA-Effekts (0.0 - 1.0)
 #endif
 #ifndef LG_CA_QUALITY_SAMPLES
 #define LG_CA_QUALITY_SAMPLES 5 // 3 = Standard (R,G,B), 5 = High Quality (R,Y,G,C,B)
@@ -44,21 +44,26 @@
 #define LG_EPS 1e-8
 #endif
 
-// ===== Neuer Kram (bleibt) ====
-// Kotlin/AGSL-Dispersion (nur NEW-CA)
+// ===== Neuer Kram (NEW-CA) ====
+// Kotlin/AGSL-Dispersion (NEW-CA)
 #ifndef AGSL_DISPERSION_SCALE
-#define AGSL_DISPERSION_SCALE 0.25
+#define AGSL_DISPERSION_SCALE 0.4   // FIX: wie gewünscht
 #endif
 #ifndef AGSL_CA_USE_BLUR_SAMPLER
 #define AGSL_CA_USE_BLUR_SAMPLER 1
 #endif
 
-// Refraktions-AA (wirkt auf Basis-Sample – auch wenn CA=0)
+// Optionaler Gain nur für NEW-CA (falls du noch mehr „Lines“ willst)
+#ifndef LG_CA_NEW_GAIN
+#define LG_CA_NEW_GAIN 1.0
+#endif
+
+// Refraktions-AA (Basis-Sample – auch wenn CA>0)
 #ifndef LG_REFRACT_AA
 #define LG_REFRACT_AA 1
 #endif
 #ifndef LG_REFRACT_AA_TAPS
-#define LG_REFRACT_AA_TAPS 4
+#define LG_REFRACT_AA_TAPS 4   // 4 oder 8 (RGSS)
 #endif
 #ifndef LG_REFRACT_AA_RADIUS_PX
 #define LG_REFRACT_AA_RADIUS_PX 0.75
@@ -70,9 +75,9 @@
 #define LG_REFRACT_AA_ALONG_CA 0.5
 #endif
 
-// CA-spezifisches Extra-Smoothing (für NEW-CA – und optional OLD-CA)
+// CA-spezifisches Extra-Smoothing
 #ifndef LG_CA_AA_TAPS
-#define LG_CA_AA_TAPS 8
+#define LG_CA_AA_TAPS 8       // 4, 8 – oder 2, wenn du im caSampleAA auf 2-Tap gehst
 #endif
 #ifndef LG_CA_AA_RADIUS_PX
 #define LG_CA_AA_RADIUS_PX 1.15
@@ -88,9 +93,6 @@
 #ifndef LG_CA_OLD_USE_AA
 #define LG_CA_OLD_USE_AA 1
 #endif
-#ifndef LG_CA_OLD_AA_TAPS
-#define LG_CA_OLD_AA_TAPS LG_CA_AA_TAPS
-#endif
 #ifndef LG_CA_OLD_AA_RADIUS_PX
 #define LG_CA_OLD_AA_RADIUS_PX LG_CA_AA_RADIUS_PX
 #endif
@@ -100,14 +102,14 @@
 
 // Kombination Alt+Neu
 #ifndef LG_CA_COMBINE_MODE
-#define LG_CA_COMBINE_MODE 2  // 0=new, 1=old, 2=both
+#define LG_CA_COMBINE_MODE 0  // 0=new, 1=old, 2=both
 #endif
 #ifndef LG_CA_BLEND
 #define LG_CA_BLEND 0.5
 #endif
 // *** WICHTIG: alter CA nur 1/50 der externen chromaticAberration ***
 #ifndef LG_CA_OLD_SCALE
-#define LG_CA_OLD_SCALE 0.012
+#define LG_CA_OLD_SCALE 0.008
 #endif
 
 // ---------- Host-provided uniforms (declared in main .frag) ----------
@@ -250,6 +252,16 @@ float sdShapeCoreAt(int idx, vec2 p){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// 1b) Helper: SDF-Space → Screen-Pixel (invertiert uTransform)
+vec2 sdfToScreenPx(vec2 pSdf){
+  // uTransform mappt: pSdf = uTransform * vec4(pScreen, 0, 1)
+  mat4 invT = inverse(uTransform);
+  vec4 ps4  = invT * vec4(pSdf, 0.0, 1.0);
+  float w   = max(ps4.w, 1e-6);
+  return ps4.xy / w;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // 2) Impeller 1D Gaussian
 vec4 applyGaussian1D_Impeller(sampler2D tex, vec2 baseUV){
   vec2 pixel    = vec2(1.0 / uSize.x, 1.0 / uSize.y);
@@ -350,6 +362,58 @@ vec3 applyWhiteFringe(vec3 baseColor, vec3 normal, float sd, float rimWidthPx, f
   return mix(baseColor, vec3(1.0), clamp(amt, 0.0, 1.0));
 }
 
+// ---------- NEUES Shape-Coverage-AA basierend auf SDF ----------
+float shapeCoverageAA(float sd){
+  float w = fwidth(sd);
+  return smoothstep(-w, w, -sd); // innen (sd<0) -> 1, außen (sd>0) -> 0
+}
+
+// ---------- Helper: AA-Sampling für CA ohne teuren Blur-Kernel ----------
+vec4 sampleForAA(sampler2D tex, vec2 uv){
+#if 1
+  // Für CA-AA-Taps: nur normales Texture-Fetch, kein zusätzlicher 1D-Gauss
+  return texScreen(tex, uv);
+#else
+  // Falls du testen willst, dass CA-AA-Taps auch den Blur-Kernel benutzen:
+  return applyGaussian1D_Impeller(tex, uv);
+#endif
+}
+
+// ---------- CA-spezifisches AA entlang der Aberration ----------
+vec4 caSampleAA(
+  sampler2D tex,
+  vec2 uvCenter,
+  vec2 aberrUV,
+  vec2 sizePx
+){
+  float caLenPx = length(aberrUV * sizePx);
+  if (caLenPx < 1e-4) {
+    // Kleiner als ein Subpixel → keine sichtbare CA → 1 Sample reicht
+    return sampleForAA(tex, uvCenter);
+  }
+
+  vec2 px  = 1.0 / sizePx;
+  vec2 dir = normalize(aberrUV + vec2(1e-6));
+
+  float radiusPx = float(LG_CA_AA_RADIUS_PX);
+  float strength = clamp(float(LG_CA_AA_STRENGTH), 0.0, 1.0);
+
+  vec2 offPx = dir * radiusPx;
+  vec2 offUV = offPx * px;
+
+  vec4 c0 = sampleForAA(tex, uvCenter);
+  vec4 c1 = sampleForAA(tex, uvCenter + offUV);
+  vec4 c2 = sampleForAA(tex, uvCenter - offUV);
+
+#if LG_CA_AA_TAPS == 2
+  vec4 avg = 0.5 * (c1 + c2);
+#else
+  vec4 avg = (c0 + c1 + c2) / 3.0;
+#endif
+
+  return mix(c0, avg, strength);
+}
+
 // ---------- Refraktions-AA: RGSS ----------
 vec4 _rgss_sample4(sampler2D tex, vec2 uv, vec2 px, vec2 dir, float radiusPx, float alongGain){
   vec2 ortho = vec2(-dir.y, dir.x);
@@ -358,10 +422,11 @@ vec4 _rgss_sample4(sampler2D tex, vec2 uv, vec2 px, vec2 dir, float radiusPx, fl
   vec2 a1 = (dir * (o1.x * alongGain) + ortho * o1.y) * radiusPx;
   vec2 a2 = (dir * (o2.x * alongGain) + ortho * o2.y) * radiusPx;
   vec2 a3 = (dir * (o3.x * alongGain) + ortho * o3.y) * radiusPx;
-  vec4 c0 = texScreen(tex, uv + a0 * px);
-  vec4 c1 = texScreen(tex, uv + a1 * px);
-  vec4 c2 = texScreen(tex, uv + a2 * px);
-  vec4 c3 = texScreen(tex, uv + a3 * px);
+
+  vec4 c0 = applyGaussian1D_Impeller(tex, uv + a0 * px);
+  vec4 c1 = applyGaussian1D_Impeller(tex, uv + a1 * px);
+  vec4 c2 = applyGaussian1D_Impeller(tex, uv + a2 * px);
+  vec4 c3 = applyGaussian1D_Impeller(tex, uv + a3 * px);
   return (c0 + c1 + c2 + c3) * 0.25;
 }
 vec4 _rgss_sample8(sampler2D tex, vec2 uv, vec2 px, vec2 dir, float radiusPx, float alongGain){
@@ -374,10 +439,11 @@ vec4 _rgss_sample8(sampler2D tex, vec2 uv, vec2 px, vec2 dir, float radiusPx, fl
   for (int i=0;i<8;i++){
     vec2 o = offs[i];
     vec2 a = (dir * (o.x * alongGain) + ortho * o.y) * radiusPx;
-    acc += texScreen(tex, uv + a * px);
+    acc += applyGaussian1D_Impeller(tex, uv + a * px);
   }
   return acc * (1.0/8.0);
 }
+
 vec4 _refractAA(sampler2D tex, vec2 uv, vec2 sizePx, vec2 dirUV, float radiusPx, float strength, float alongGain){
   vec2 px = vec2(1.0/sizePx.x, 1.0/sizePx.y);
   vec2 dir = normalize(dirUV + vec2(1e-6));
@@ -386,11 +452,11 @@ vec4 _refractAA(sampler2D tex, vec2 uv, vec2 sizePx, vec2 dirUV, float radiusPx,
 #else
   vec4 avg = _rgss_sample4(tex, uv, px, dir, radiusPx, alongGain);
 #endif
-  vec4 base = texScreen(tex, uv);
+  vec4 base = applyGaussian1D_Impeller(tex, uv);
   return mix(base, avg, clamp(strength, 0.0, 1.0));
 }
 
-// CA-spezifisches AA (roh, ohne Blur) – für NEW-CA (und wir benutzen es jetzt auch für OLD-CA-AA)
+// CA-spezifisches AA (für OLD-CA, falls aktiv)
 vec4 _refractAA_CA(sampler2D tex, vec2 uv, vec2 sizePx, vec2 dirUV, float radiusPx, float strength, float alongGain){
   vec2 px = vec2(1.0/sizePx.x, 1.0/sizePx.y);
   vec2 dir = normalize(dirUV + vec2(1e-6));
@@ -399,18 +465,17 @@ vec4 _refractAA_CA(sampler2D tex, vec2 uv, vec2 sizePx, vec2 dirUV, float radius
 #else
   vec4 avg = _rgss_sample4(tex, uv, px, dir, radiusPx, alongGain);
 #endif
-  vec4 base = texScreen(tex, uv);
+  vec4 base = applyGaussian1D_Impeller(tex, uv);
   return mix(base, avg, clamp(strength, 0.0, 1.0));
 }
 
-// ===== OLD-CA: vormals "blurred" AA → jetzt roh (kein Blur) =====
+// ===== OLD-CA: vormals "blurred" AA → bleibt geblurrt =====
 vec4 _refractAA_CA_OLD_BLURRED(sampler2D tex, vec2 uv, vec2 sizePx, vec2 dirUV, float radiusPx, float strength, float alongGain){
-  // Alias auf die roh-samplende Variante; der Name bleibt für Backwards-Compatibility erhalten.
   return _refractAA_CA(tex, uv, sizePx, dirUV, radiusPx, strength, alongGain);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Refraction + NEW-CA (Kotlin/AGSL) + Refraktions-AA + (optional) alter CA
+// Refraction + NEW-CA (distUV^3 um Shape-Center) + optional OLD-CA
 vec4 calculateRefraction(
   vec2 screenUV, vec3 normal, float sd, float height, float thickness,
   float refractiveIndex, float chromaticAberration,
@@ -420,7 +485,6 @@ vec4 calculateRefraction(
   vec2 lightDirection, float lightIntensity,
   int   currentShapeIdx
 ){
-  // Brechung + Weglänge + Rand-Boost
   vec3 incident = vec3(0.0, 0.0, -1.0);
   float n       = max(refractiveIndex, 1.0001);
   vec3 refr     = refract(incident, normal, 1.0 / n);
@@ -438,79 +502,85 @@ vec4 calculateRefraction(
   refractionDisplacement = dispPx / sizePx;
   vec2 uvBase = screenUV + refractionDisplacement;
 
-  // Basis (G-Anker) mit Refraktions-AA
+  // Basis (G-Anker) mit 1D-Blur
   vec4 gS = applyGaussian1D_Impeller(backgroundTexture, uvBase);
+
+  // CA-Wert aus Uniform
+  float ca = max(chromaticAberration, 0.0);
+
+  // WICHTIG:
+  // Wenn CA ~ 0 → kein CA, kein Refract-AA → nur Blur, maximal billig.
+  if (ca <= 1e-4) {
+    return gS;
+  }
+
 #if LG_REFRACT_AA
+  // Refraktions-AA nur aktiv, wenn CA > 0 (weil teuer)
   vec2 dirRefUV = dispPx / sizePx;
   gS = _refractAA(backgroundTexture, uvBase, sizePx, dirRefUV,
                   float(LG_REFRACT_AA_RADIUS_PX), float(LG_REFRACT_AA_STRENGTH),
                   mix(1.0, 1.8, clamp(float(LG_REFRACT_AA_ALONG_CA), 0.0, 1.0)));
-#else
-  vec2 dirRefUV = dispPx / sizePx;
 #endif
 
-  float ca = max(chromaticAberration, 0.0);
-  if (ca <= 1e-6) return gS;
+  // ---------- NEW-CA (AGSL, relativ zum Shape-Zentrum im Screen-Space) ----------
+  vec3 diff_new = vec3(0.0);
+#if (LG_CA_COMBINE_MODE != 1)   // nicht "old only"
+  {
+    float st, cr; vec2 cSdf, szSdf;
+    _readShapeRaw(currentShapeIdx, st, cSdf, szSdf, cr);
 
-  // ---------- NEUER CA (AGSL, relativ zum Shape-Zentrum) ----------
-  float st, cr; vec2 cPx, szPx;
-  _readShapeRaw(currentShapeIdx, st, cPx, szPx, cr);
-  float minDim = min(szPx.x, szPx.y);
+    // SDF-Center → Screen-Pixel → UV
+    vec2 centerPx = sdfToScreenPx(cSdf);
+    vec2 centerUV = _uv_from_px(centerPx, sizePx);
 
-  vec2 centerUV = cPx / sizePx;
-#ifdef IMPELLER_TARGET_OPENGLES
-  centerUV.y = 1.0 - centerUV.y;
-#endif
+    // Shape-Größe von SDF-Space in Screen-Pixel umrechnen
+    vec2 col0 = uTransform[0].xy;
+    vec2 col1 = uTransform[1].xy;
+    float scaleX = max(length(col0), 1e-6); // SDF-units pro Screen-Pixel-X
+    float scaleY = max(length(col1), 1e-6); // SDF-units pro Screen-Pixel-Y
 
-  vec2 distUV = uvBase - centerUV;
-  float dispersion = ca * AGSL_DISPERSION_SCALE;
-  vec2 minDimOverSize = vec2(minDim / sizePx.x, minDim / sizePx.y);
-  vec2 dist3 = distUV * distUV * distUV;
-  vec2 aberrUV = dispersion * dist3 * minDimOverSize;
+    float widthScreen  = szSdf.x / scaleX;
+    float heightScreen = szSdf.y / scaleY;
+    float minDimScreen = min(widthScreen, heightScreen);
 
-  vec2 uvR = uvBase - aberrUV;
-  vec2 uvG = uvBase;
-  vec2 uvB = uvBase + aberrUV;
+    vec2 distUV = uvBase - centerUV;           // in UV
+    float dispersion = ca * AGSL_DISPERSION_SCALE;
 
-  // Guard: Samples nur innerhalb der Shape
-  vec2 pxR = _px_from_uv(uvR, sizePx);
-  vec2 pxB = _px_from_uv(uvB, sizePx);
-  vec2 pR  = (uTransform * vec4(pxR, 0.0, 1.0)).xy;
-  vec2 pB  = (uTransform * vec4(pxB, 0.0, 1.0)).xy;
-  bool validR = (sdShapeCoreAt(currentShapeIdx, pR) <= 0.0);
-  bool validB = (sdShapeCoreAt(currentShapeIdx, pB) <= 0.0);
+    // Normierung mit minDimScreen / size
+    vec2 minDimOverSize = vec2(minDimScreen / sizePx.x, minDimScreen / sizePx.y);
 
-#if AGSL_CA_USE_BLUR_SAMPLER
-  vec4 sG_new = gS;
-  vec4 sR_new = validR ? applyGaussian1D_Impeller(backgroundTexture, uvR) : sG_new;
-  vec4 sB_new = validB ? applyGaussian1D_Impeller(backgroundTexture, uvB) : sG_new;
-#else
-  vec4 sG_new = texScreen(backgroundTexture, uvG);
-  vec4 sR_new = validR ? texScreen(backgroundTexture, uvR) : sG_new;
-  vec4 sB_new = validB ? texScreen(backgroundTexture, uvB) : sG_new;
-#endif
+    // per-Komponente kubisch wie Kotlin-Variante
+    vec2 dist3   = distUV * distUV * distUV;
+    vec2 aberrUV = dispersion * dist3 * minDimOverSize;
 
-  // CA-AA NUR für neuen CA (roh)
-  vec2 dirCAA = normalize(aberrUV + vec2(1e-6));
-  sG_new = _refractAA_CA(backgroundTexture, uvG, sizePx, dirCAA,
-                         float(LG_CA_AA_RADIUS_PX), float(LG_CA_AA_STRENGTH),
-                         mix(1.0, 1.8, clamp(float(LG_REFRACT_AA_ALONG_CA), 0.0, 1.0)));
-  if (validR) sR_new = _refractAA_CA(backgroundTexture, uvR, sizePx, dirCAA,
-                                     float(LG_CA_AA_RADIUS_PX), float(LG_CA_AA_STRENGTH),
-                                     mix(1.0, 1.8, clamp(float(LG_REFRACT_AA_ALONG_CA), 0.0, 1.0)));
-  if (validB) sB_new = _refractAA_CA(backgroundTexture, uvB, sizePx, dirCAA,
-                                     float(LG_CA_AA_RADIUS_PX), float(LG_CA_AA_STRENGTH),
-                                     mix(1.0, 1.8, clamp(float(LG_REFRACT_AA_ALONG_CA), 0.0, 1.0)));
+    vec2 uvR = uvBase - aberrUV;
+    vec2 uvG = uvBase;
+    vec2 uvB = uvBase + aberrUV;
 
-  vec3 spectral_new = vec3(sR_new.r, sG_new.g, sB_new.b);
-  vec3 diff_new     = spectral_new - gS.rgb;
-  diff_new *= float(LG_CA_LIGHTNESS_BOOST);
-  float lum_new = dot(diff_new, vec3(0.299,0.587,0.114));
-  diff_new = mix(vec3(lum_new), diff_new, float(LG_CA_SATURATION_BOOST));
+    // Guard: R/B nur innerhalb Shape (SDF-Space-Check)
+    vec2 pxR = _px_from_uv(uvR, sizePx);
+    vec2 pxB = _px_from_uv(uvB, sizePx);
+    vec2 pR  = (uTransform * vec4(pxR, 0.0, 1.0)).xy;
+    vec2 pB  = (uTransform * vec4(pxB, 0.0, 1.0)).xy;
+    bool validR = (sdShapeCoreAt(currentShapeIdx, pR) <= 0.0);
+    bool validB = (sdShapeCoreAt(currentShapeIdx, pB) <= 0.0);
 
-  // ---------- ALTER CA (linear entlang Refraktion) – JETZT OHNE BLUR ----------
+    // CA-AA nur mit leichten texScreen-Taps (sampleForAA)
+    vec4 sG_new = caSampleAA(backgroundTexture, uvG, aberrUV, sizePx);
+    vec4 sR_new = validR ? caSampleAA(backgroundTexture, uvR, aberrUV, sizePx) : sG_new;
+    vec4 sB_new = validB ? caSampleAA(backgroundTexture, uvB, aberrUV, sizePx) : sG_new;
+
+    vec3 spectral_new = vec3(sR_new.r, sG_new.g, sB_new.b);
+    diff_new = spectral_new - gS.rgb;
+    diff_new *= float(LG_CA_LIGHTNESS_BOOST) * float(LG_CA_NEW_GAIN);
+    float lum_new = dot(diff_new, vec3(0.299,0.587,0.114));
+    diff_new = mix(vec3(lum_new), diff_new, float(LG_CA_SATURATION_BOOST));
+  }
+#endif // NEW-CA
+
+  // ---------- OLD-CA (linear entlang Refraktion) ----------
   vec3 diff_old = vec3(0.0);
-#if (LG_CA_COMBINE_MODE != 0)
+#if (LG_CA_COMBINE_MODE != 0)   // nicht "new only"
   {
     vec2 invUSize = 1.0 / sizePx;
     float ca_old = ca * float(LG_CA_OLD_SCALE);
@@ -541,7 +611,6 @@ vec4 calculateRefraction(
       spectral_old.g = 0.5 * (sY.g + sC.g);
       spectral_old.b = 0.5 * (sC.b + sB.b);
 #else
-      // Roh, ohne AA/Blur
       vec4 sR = texScreen(backgroundTexture, screenUV + dR);
       vec4 sY = texScreen(backgroundTexture, screenUV + dY);
       vec4 sC = texScreen(backgroundTexture, screenUV + dC);
@@ -553,7 +622,6 @@ vec4 calculateRefraction(
 #endif // LG_CA_OLD_USE_AA
 
 #else
-      // 3er Standard
       vec2 redUV  = screenUV + dispPx * (1.0 + dispersionStrength) * invUSize;
       vec2 blueUV = screenUV + dispPx * (1.0 - dispersionStrength) * invUSize;
 
@@ -566,7 +634,6 @@ vec4 calculateRefraction(
       vec4 sB_aa  = _refractAA_CA_OLD_BLURRED(backgroundTexture, blueUV, sizePx, dirCAA_old, radOld, strOld, alongOld);
       vec3 spectral_old = vec3(sR_aa.r, gS.g, sB_aa.b);
 #else
-      // Roh, ohne Blur
       float red  = texScreen(backgroundTexture, redUV ).r;
       float blue = texScreen(backgroundTexture, blueUV).b;
       vec3 spectral_old = vec3(red, gS.g, blue);
@@ -579,13 +646,13 @@ vec4 calculateRefraction(
       diff_old = mix(vec3(lum_old), diff_old, float(LG_CA_SATURATION_BOOST));
     }
   }
-#endif
+#endif // LG_CA_COMBINE_MODE != 0
 
   // Kombination
   float caMixNew = clamp(float(LG_CA_OPACITY), 0.0, 1.0);
   float caMixOld = clamp(float(LG_CA_OPACITY), 0.0, 1.0);
 
-  // Feather nur für NEW-CA (OLD bleibt „roh“ am Rand wie früher)
+  // Feather nur für NEW-CA
   float edgeAA = smoothstep(-float(LG_CA_EDGE_FEATHER_PX) * fwidth(sd), 0.0, -sd);
   caMixNew *= edgeAA;
 
@@ -612,11 +679,11 @@ vec3 calculateLighting(
   if (thicknessFactor < 0.01 || lightIntensity < 0.01) return vec3(0.0);
 
   RimMasks rm   = rimMasksInner(sd, rimWidthPx, rimSharpness);
-  vec2  L        = lightDirection;
-  vec2  nxy      = lg_norm2(normal.xy);
-  float facing   = abs(dot(nxy, L));
+  vec2  L       = lightDirection;
+  vec2  nxy     = lg_norm2(normal.xy);
+  float facing  = abs(dot(nxy, L));
   float lightMask= pow(facing, 0.7);
-  float rimMask  = rm.band * lightMask;
+  float rimMask = rm.band * lightMask;
   if (rimMask < 1e-3) return vec3(0.0);
 
   float mainL = max(0.0, dot(nxy,  L));
@@ -749,7 +816,6 @@ vec4 renderLiquidGlass(
     currentShapeIdx
   );
 
-  // Sparkle am Rand
   refractColorBase.rgb = applyWhiteFringe(refractColorBase.rgb, normal, sd, rimWidthPx, rimSharpness);
 
   vec3 lighting = calculateLighting(
@@ -758,12 +824,10 @@ vec4 renderLiquidGlass(
     backgroundColor.rgb, rimWidthPx, rimSharpness
   );
 
-  // Standard-Pipeline (ohne Glow-Override)
   vec4 coloredBase = applyGlassColor(refractColorBase, glassColor);
   coloredBase.rgb += lighting;
   coloredBase.rgb  = applySaturationLightness(coloredBase.rgb, saturation, lightness);
 
-  // Glow (unverändert)
   float gStrength  = uGlowParams.x;
   float gPower     = max(uGlowParams.y, 0.0001);
   float gTintMode  = uGlowParams.z;
@@ -784,7 +848,7 @@ vec4 renderLiquidGlass(
   vec4 outColor = coloredBase;
 
   if (gStrength > 0.0001 && uTouchCount_f > 0.5){
-    vec2 pPx = screenUV * uSizePx; // Pixelkoords (für uTouches)
+    vec2 pPx = screenUV * uSizePx;
     float maskRaw = glowTouchMask(pPx, p, gInside, sd, currentShapeIdx);
     if (maskRaw > 0.0){
       float shaped = pow(clamp(maskRaw, 0.0, 1.0), gPower) * gStrength * oMix;
@@ -827,9 +891,21 @@ vec4 renderLiquidGlass(
     }
   }
 
+  // Finaler Alpha-Mix mit Shape-Coverage-AA (Silhouette super smooth)
   RimMasks rm = rimMasksInner(sd, rimWidthPx, rimSharpness);
+
+  // 1) AA-Coverage aus SDF (Silhouette-AA)
+  float coverage = shapeCoverageAA(sd);
+
+  // 2) Basisalpha: Material-Alpha * Coverage
+  float baseA = foregroundAlpha * coverage;
+
+  // 3) Rim-Boost beibehalten
   float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPx/64.0, 0.0, 1.0));
-  float mixA = clamp(max(foregroundAlpha, rm.band * edgeAlphaGain), 0.0, 1.0);
+  float rimA = rm.band * edgeAlphaGain;
+
+  // 4) Kombiniert
+  float mixA = clamp(max(baseA, rimA), 0.0, 1.0);
 
   return mix(backgroundColor, outColor, mixA);
 }

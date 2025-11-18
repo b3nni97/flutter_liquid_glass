@@ -130,7 +130,7 @@ class LiquidGlassSettings with EquatableMixin {
     this.glassColor = const Color.fromARGB(0, 255, 255, 255),
     this.thickness = 20,
     this.blur = 0,
-    this.chromaticAberration = .01,
+    this.chromaticAberration = 0,
     this.blend = 20,
     this.lightAngle = 0.5 * pi,
     this.lightIntensity = .2,
