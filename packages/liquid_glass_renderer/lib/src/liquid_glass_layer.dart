@@ -277,10 +277,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
   bool _hInvariantsInitialized = false;
 
-  // BackdropFilter layer handles (one per pass) to enable retained rendering.
-  final LayerHandle<BackdropFilterLayer> _hHandle =
-      LayerHandle<BackdropFilterLayer>();
-  final LayerHandle<BackdropFilterLayer> _vHandle =
+  // UPDATED: Nur noch ein Handle für den kombinierten BackdropFilter.
+  final LayerHandle<BackdropFilterLayer> _backdropHandle =
       LayerHandle<BackdropFilterLayer>();
 
   /// Swap shaders. This also resets kernel-related caches as necessary.
@@ -797,8 +795,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
     // Early exit if the effect is disabled or there is nothing to render.
     if (_settings.thickness <= 0 || shapes.isEmpty) {
-      _hHandle.layer = null;
-      _vHandle.layer = null;
+      _backdropHandle.layer = null; // Clear single handle
       _paintShapeContents(context, offset, shapes, glassContainsChild: true);
       _paintShapeContents(context, offset, shapes, glassContainsChild: false);
       super.paint(context, offset);
@@ -830,62 +827,41 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     // ABOVE the glass first.
     _paintShapeContents(context, offset, shapes, glassContainsChild: true);
 
+    // UPDATED: Use ImageFilter.compose with a single LayerHandle
+    // "inner" (blurH) wird zuerst ausgeführt, dann "outer" (shader/glass) auf das Ergebnis.
+    // Das garantiert, dass der horizontale Pass nicht verschluckt wird.
+    ImageFilter? composedFilter;
+
+    if (sigmaPx > 0.01 && nKernel > 0) {
+      composedFilter = ImageFilter.compose(
+        outer: ImageFilter.shader(_shader), // V-Pass + Effects
+        inner: ImageFilter.shader(_blurH), // H-Pass (Blur only)
+      );
+    } else {
+      // Kein Blur nötig, nur der Glass-Shader
+      composedFilter = ImageFilter.shader(_shader);
+    }
+
+    final BackdropFilterLayer backdropLayer =
+        _backdropHandle.layer ?? BackdropFilterLayer();
+    backdropLayer.filter = composedFilter;
+
     context.pushClipRect(
       true,
       offset,
       bounds,
       (ctxRect, offRect) {
-        // ---------- PASS 1: Horizontal blur ----------
-        // if (sigmaPx > 0.0 && nKernel > 0) {
-        //   final BackdropFilterLayer hLayer =
-        //       _hHandle.layer ?? BackdropFilterLayer();
-        //   hLayer..filter = ImageFilter.shader(_blurH);
-
-        //   ctxRect.pushLayer(hLayer, (c2, o2) {
-        //     final paint = Paint()..color = const Color(0x01000000);
-        //     c2.canvas.drawRect(bounds.shift(-offRect), paint);
-        //   }, offRect);
-        //   _hHandle.layer = hLayer;
-        // } else {
-        //   _hHandle.layer = null;
-        // }
-
-        // ---------- PASS 2: Vertical blur + glass ----------
-        final int nV = (sigmaPx > 0.0) ? nKernel : 0;
-
-        _shader
-          ..setFloat(_blurBaseFloat + 0, 0.0)
-          ..setFloat(_blurBaseFloat + 1, 1.0)
-          ..setFloat(_blurBaseFloat + 2, nV.toDouble())
-          ..setFloat(_blurBaseFloat + 3, 0.0);
-
-        if (nV != _lastKernelCountV) {
-          int baseV = _blurSamplesFloat;
-          for (int i = 0; i < nV; i++) {
-            final s = kernel[i];
-            _shader
-              ..setFloat(baseV + 0, s.tPx)
-              ..setFloat(baseV + 1, 0.0)
-              ..setFloat(baseV + 2, s.w)
-              ..setFloat(baseV + 3, 0.0);
-            baseV += 4;
-          }
-          _lastKernelCountV = nV;
-        }
-
-        final BackdropFilterLayer vLayer =
-            _vHandle.layer ?? BackdropFilterLayer();
-        vLayer..filter = ImageFilter.shader(_shader);
-
-        ctxRect.pushLayer(vLayer, (c2, o2) {
-          final paint = Paint()..color = const Color(0x01000000);
-
-          c2.canvas.drawRect(bounds.shift(-offRect), paint);
+        ctxRect.pushLayer(backdropLayer, (childCtx, childOff) {
+          // Ein transparenter Rect reicht, um den Filter anzuwenden.
+          childCtx.canvas.drawRect(
+            bounds.shift(-childOff),
+            Paint()..color = const Color(0x00000000),
+          );
         }, offRect);
-        _vHandle.layer = vLayer;
       },
       clipBehavior: Clip.hardEdge,
     );
+    _backdropHandle.layer = backdropLayer;
 
     // UNDER the glass.
     _paintShapeContents(context, offset, shapes, glassContainsChild: false);
@@ -898,6 +874,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _glassLink
       ..removeListener(_onGlassLinkChanged)
       ..dispose();
+    _backdropHandle.layer = null; // Dispose single handle
     super.dispose();
   }
 
