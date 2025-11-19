@@ -734,7 +734,7 @@ vec4 applyGlassColor(vec4 liquidColor, vec4 glassColor){
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Glow helpers & lokaler Zusatz-Blur (unverändert)
+// Glow helpers & lokaler Zusatz-Blur
 #ifndef GLOW_OWNER_FEATHER_PX
 #define GLOW_OWNER_FEATHER_PX 1.6
 #endif
@@ -754,7 +754,7 @@ float glowTouchMask(vec2 pPx, vec2 pSdf, float /*insideOnly*/, float /*sdUnion*/
     float inShape = smoothstep(0.0, wAA, -sdOwner);
     if (inShape <= 1e-5) continue;
 
-    vec4  tp    = uTouches[i]; // (x_px, y_px, r_px, fade_px)
+    vec4  tp    = uTouches[i]; // (x_px, y_px, r_px, fade_px) — globale Device-Pixel
     float d     = length(pPx - tp.xy);
     float inner = tp.z;
     float outer = tp.z + max(tp.w, 1e-3);
@@ -848,7 +848,8 @@ vec4 renderLiquidGlass(
   vec4 outColor = coloredBase;
 
   if (gStrength > 0.0001 && uTouchCount_f > 0.5){
-    vec2 pPx = screenUV * uSizePx;
+    // Wichtig: p ist globaler SDF-Space in Device-Pixel → passt zu uTouches.xy
+    vec2 pPx = p;
     float maskRaw = glowTouchMask(pPx, p, gInside, sd, currentShapeIdx);
     if (maskRaw > 0.0){
       float shaped = pow(clamp(maskRaw, 0.0, 1.0), gPower) * gStrength * oMix;

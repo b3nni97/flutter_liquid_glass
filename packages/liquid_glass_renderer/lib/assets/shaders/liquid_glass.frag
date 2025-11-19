@@ -97,23 +97,25 @@ vec3 _buildNormal3_fromUnion(float sdUnion, vec2 grad2){
 }
 
 void main(){
-  // Screen-Koords + UV
-  vec2 pScreen = FlutterFragCoord().xy;
+  // Screen-Koords (lokale Layer-Pixel) + UV
+  vec2 pScreen = FlutterFragCoord().xy;      // Layer-space in Device-Pixel
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
   vec2 screenUV = pScreen * invSize;
 #ifdef IMPELLER_TARGET_OPENGLES
   screenUV.y = 1.0 - screenUV.y;
 #endif
 
-  // SDF-Koords (transformierter Raum: Screen → SDF)
+  // SDF-Koords (globaler SDF-Space in Device-Pixel)
+  // uTransform ist Translation in globale Device-Pixel:
+  // p = uTransform * pScreen → globale Pixelkoordinaten
   vec4 transformedCoord = uTransform * vec4(pScreen, 0.0, 1.0);
   vec2 p = transformedCoord.xy;
 
-  // Union-SDF + Shape-Index
+  // Union-SDF + Shape-Index im SDF-Space (global)
   int   idx;
   float sdUnion = sceneSDF_withIndex_fast(p, idx);
 
-  // AA-Maske
+  // AA-Maske (Kanten-Antialiasing im AGSL-Stil)
   float foregroundAlpha = smoothstep(
     0.0,
     AGSL_AA_WIDTH_PX,
@@ -129,46 +131,46 @@ void main(){
   // ───────────────── Hintergrund-Scaling um echtes Shape-Zentrum ───────────
   float s = max(uBgScale, 1e-4);
 
-  // Shape-Center in SDF-Space:
+  // Shape-Center in SDF-Space (global in Device-Pixel gespeichert)
   float cx = uShapeData[idx * 6 + 1];
   float cy = uShapeData[idx * 6 + 2];
 
-  // SDF → Screen-Pixel per Helper
+  // SDF → Screen-Pixel via Helper (inverse(uTransform))
   vec2 centerScreenPx = sdfToScreenPx(vec2(cx, cy));
 
-  // In UV umrechnen
+  // In UV umrechnen (Layer-space)
   vec2 centerUV = centerScreenPx * invSize;
 #ifdef IMPELLER_TARGET_OPENGLES
   centerUV.y = 1.0 - centerUV.y;
 #endif
 
-  // Skalierte Background-UV (wie in der alten Version)
+  // Skalierte Background-UV um echtes Shape-Zentrum
   vec2 scaledUV = centerUV + (screenUV - centerUV) / s;
 
-  // Normale aus Union-SDF
+  // Normale aus Union-SDF (im SDF-Space)
   vec2 grad2  = _unionGrad2_df(sdUnion);
   vec3 normal = _buildNormal3_fromUnion(sdUnion, grad2);
 
-  // Volle Liquid-Glass-Pipeline (CA/Blur/Glow in shared.glsl)
+  // Volle Liquid-Glass-Pipeline (Refraction + CA + Glow etc. in shared.glsl)
   fragColor = renderLiquidGlass(
-      scaledUV,           // screenUV (inkl. Background-Scale um Shape-Zentrum)
-      p,                  // p (SDF-Space)
-      uSize,              // uSizePx
-      sdUnion,            // sd
-      uThickness,         // thickness
-      uRefractiveIndex,   // refractiveIndex
+      scaledUV,             // screenUV (inkl. Background-Scale um Shape-Zentrum)
+      p,                    // p (SDF-Space, globale Device-Pixel)
+      uSize,                // uSizePx
+      sdUnion,              // sd
+      uThickness,           // thickness
+      uRefractiveIndex,     // refractiveIndex
       uChromaticAberration, // chromaticAberration
-      uGlassColor,        // glassColor
-      uLightDirection,    // lightDirection
-      uLightIntensity,    // lightIntensity
-      uAmbientStrength,   // ambientStrength
-      uBackgroundTexture, // backgroundTexture
-      normal,             // normal
-      foregroundAlpha,    // foregroundAlpha
-      uSaturation,        // saturation
-      uLightness,         // lightness
-      rimWidthPx,         // rimWidthPx
-      rimSharpness,       // rimSharpness
-      idx                 // currentShapeIdx
+      uGlassColor,          // glassColor
+      uLightDirection,      // lightDirection
+      uLightIntensity,      // lightIntensity
+      uAmbientStrength,     // ambientStrength
+      uBackgroundTexture,   // backgroundTexture
+      normal,               // normal
+      foregroundAlpha,      // foregroundAlpha
+      uSaturation,          // saturation
+      uLightness,           // lightness
+      rimWidthPx,           // rimWidthPx
+      rimSharpness,         // rimSharpness
+      idx                   // currentShapeIdx
   );
 }
