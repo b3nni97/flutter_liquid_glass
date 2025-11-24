@@ -1,5 +1,3 @@
-// liquid_glass.frag — Liquid-Glass mit Kotlin-AA & -Normals (UNION-safe);
-// Background-Scale (uBgScale) korrekt um Shape-Zentrum (Screen-Space)
 #version 320 es
 
 precision mediump float;
@@ -7,34 +5,26 @@ precision mediump int;
 
 #include <flutter/runtime_effect.glsl>
 
-// ───────────────────── Packed header (fixed locations) ─────────────────────
-layout(location = 0)  uniform vec2 uSize;
-layout(location = 1)  uniform vec4 uGlassColor;
-// uOpticalProps = (RI, CA, thickness, blend)
-layout(location = 2)  uniform vec4 uOpticalProps;
-// uLightConfig = (angle, intensity, ambient, saturation)
-layout(location = 3)  uniform vec4 uLightConfig;
-// uColorAdjust = (lightness, numShapes)
-layout(location = 4)  uniform vec2 uColorAdjust;
-// vorcomputete Lichtrichtung: (cos, sin)
-layout(location = 5)  uniform vec2 uLightDirection;
-// Transform vor SDF (Screen → SDF)
-layout(location = 6)  uniform mat4 uTransform;
-// Rim: (widthPx, sharpness)
+// ───────────────────── Header ─────────────────────
+layout(location = 0) uniform vec2 uSize;
+layout(location = 1) uniform vec4 uGlassColor;
+layout(location = 2) uniform vec4 uOpticalProps;
+layout(location = 3) uniform vec4 uLightConfig;
+layout(location = 4) uniform vec2 uColorAdjust;
+layout(location = 5) uniform vec2 uLightDirection;
+layout(location = 6) uniform mat4 uTransform;
 layout(location = 10) uniform vec2 uRimParams;
 
-// ───────────────────── Shapes (max 16; fixed location) ─────────────────────
+// Shapes & Blur
 #define MAX_SHAPES 16
 layout(location = 11) uniform float uShapeData[MAX_SHAPES * 6];
-
-// ───────────────────── Blur uniforms (wie im Hostcode) ─────────────────────
 layout(location = 107) uniform vec4 uBlurHeader;
 layout(location = 108) uniform vec4 u_samples[50];
 
-// ───────────────────── Touch / Glow (Layout bleibt) ────────────────────────
+// Touch & Glow
 #define MAX_TOUCHES 8
 layout(location = 308) uniform float uTouchCount_f;
-layout(location = 309) uniform vec4  uTouches[MAX_TOUCHES];
+layout(location = 309) uniform vec4 uTouches[MAX_TOUCHES];
 layout(location = 317) uniform float uTouchOwners[MAX_TOUCHES];
 
 layout(location = 325) uniform vec4 uGlowParams;
@@ -46,131 +36,152 @@ layout(location = 330) uniform float uGlobalBlurSigma;
 layout(location = 331) uniform float uTouchGlowStrengths[MAX_TOUCHES];
 
 layout(location = 339) uniform float uBgScale;
-layout(location = 340) uniform vec2  uNormalParams;
+layout(location = 340) uniform vec2 uNormalParams;
 
-// ───────────────────── Textures / Output ───────────────────────────────────
+// ───────────────────── Projection Uniform ─────────────────────
+// xy = Offset (0..1), zw = Scale (⚠ wird in Dart so gesetzt,
+//     dass screenUV in PIXELN hereinkommt)
+layout(location = 409) uniform vec4 uChildProjection;
+
+// ───────────────────── Textures ─────────────────────
 uniform sampler2D uBackgroundTexture;
+uniform sampler2D uBackgroundChildTexture;
+
 layout(location = 0) out vec4 fragColor;
 
-// ───────────────────── Aliases ─────────────────────────────────────────────
-float uRefractiveIndex     = uOpticalProps.x;
-float uChromaticAberration = uOpticalProps.y;
-float uThickness           = uOpticalProps.z;
-float uBlend               = uOpticalProps.w;
+// ───────────────────── Aliases & Includes ─────────────────────
+float uRefractiveIndex        = uOpticalProps.x;
+float uChromaticAberration    = uOpticalProps.y;
+float uThickness              = uOpticalProps.z;
+float uBlend                  = uOpticalProps.w;
+float uLightIntensity         = uLightConfig.y;
+float uAmbientStrength        = uLightConfig.z;
+float uSaturation             = uLightConfig.w;
+float uLightness              = uColorAdjust.x;
+float uNumShapes              = uColorAdjust.y;
+float rimWidthPx              = uRimParams.x;
+float rimSharpness            = uRimParams.y;
+float uNormalPlateauWidth     = uNormalParams.x;
+float uNormalSoftness         = uNormalParams.y;
 
-float uLightIntensity      = uLightConfig.y;
-float uAmbientStrength     = uLightConfig.z;
-float uSaturation          = uLightConfig.w;
-
-float uLightness           = uColorAdjust.x;
-float uNumShapes           = uColorAdjust.y;
-
-float rimWidthPx           = uRimParams.x;
-float rimSharpness         = uRimParams.y;
-
-float uNormalPlateauWidth  = uNormalParams.x;
-float uNormalSoftness      = uNormalParams.y;
-
-// ───────────────────── Includes ────────────────────────────────────────────
 #include "shared.glsl"
 #include "lg_union_sdf.glsl"
 
-// ───────────────────── Kotlin-Style: AA & Union-Normals ────────────────────
 #ifndef AGSL_AA_WIDTH_PX
 #define AGSL_AA_WIDTH_PX 1.0
 #endif
 
-// Unnormalisierter Union-Gradient
-vec2 _unionGrad2_df(float sdUnion){
+vec2 _unionGrad2_df(float sdUnion) {
   return vec2(dFdx(sdUnion), dFdy(sdUnion));
 }
 
-// 3D-Normale (Tunable Soft)
-vec3 _buildNormal3_fromUnion(float sdUnion, vec2 grad2){
+vec3 _buildNormal3_fromUnion(float sdUnion, vec2 grad2) {
   float plateauWidth = uNormalPlateauWidth;
-  float softness     = uNormalSoftness;
-  float fullRange    = uThickness + plateauWidth;
-  float t            = max(fullRange + sdUnion, 0.0) / max(fullRange, 1e-6);
-  float n_cos        = pow(t, softness);
-  float n_sin        = sqrt(max(0.0, 1.0 - n_cos * n_cos));
+  float softness = uNormalSoftness;
+  float fullRange = uThickness + plateauWidth;
+  float t = max(fullRange + sdUnion, 0.0) / max(fullRange, 1e-6);
+  float n_cos = pow(t, softness);
+  float n_sin = sqrt(max(0.0, 1.0 - n_cos * n_cos));
   return normalize(vec3(grad2 * n_cos, n_sin));
 }
 
-void main(){
-  // Screen-Koords (lokale Layer-Pixel) + UV
-  vec2 pScreen = FlutterFragCoord().xy;      // Layer-space in Device-Pixel
+void main() {
+  // Lokale Fragment-Koordinate im ClipRect (in Device-Pixeln)
+  vec2 pScreen = FlutterFragCoord().xy;
+
+  // WICHTIG:
+  // In deinem bisherigen Setup ist uSize anscheinend entweder 0 oder identisch
+  // mit der Clip-Größe, so dass:
+  //   invSize = 1.0
+  // → screenUV == pScreen (Pixel-Koordinaten)
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
   vec2 screenUV = pScreen * invSize;
 #ifdef IMPELLER_TARGET_OPENGLES
   screenUV.y = 1.0 - screenUV.y;
 #endif
 
-  // SDF-Koords (globaler SDF-Space in Device-Pixel)
-  // uTransform ist Translation in globale Device-Pixel:
-  // p = uTransform * pScreen → globale Pixelkoordinaten
+  // p: globale Device-Pixel-Koordinate relativ zum Layer-Ursprung
   vec4 transformedCoord = uTransform * vec4(pScreen, 0.0, 1.0);
   vec2 p = transformedCoord.xy;
 
-  // Union-SDF + Shape-Index im SDF-Space (global)
-  int   idx;
+  // Signed Distance Field im globalen SDF-Space (Device-Pixel)
+  int idx;
   float sdUnion = sceneSDF_withIndex_fast(p, idx);
 
-  // AA-Maske (Kanten-Antialiasing im AGSL-Stil)
   float foregroundAlpha = smoothstep(
     0.0,
     AGSL_AA_WIDTH_PX,
     clamp(-sdUnion, 0.0, AGSL_AA_WIDTH_PX)
   );
 
+  // Hintergrund-Sampling
   vec4 src = texScreen(uBackgroundTexture, screenUV);
-  if (foregroundAlpha < 0.01){
+  if (foregroundAlpha < 0.01) {
     fragColor = src;
     return;
   }
 
-  // ───────────────── Hintergrund-Scaling um echtes Shape-Zentrum ───────────
+  // Scale Logic für Background
   float s = max(uBgScale, 1e-4);
-
-  // Shape-Center in SDF-Space (global in Device-Pixel gespeichert)
   float cx = uShapeData[idx * 6 + 1];
   float cy = uShapeData[idx * 6 + 2];
-
-  // SDF → Screen-Pixel via Helper (inverse(uTransform))
   vec2 centerScreenPx = sdfToScreenPx(vec2(cx, cy));
-
-  // In UV umrechnen (Layer-space)
   vec2 centerUV = centerScreenPx * invSize;
 #ifdef IMPELLER_TARGET_OPENGLES
   centerUV.y = 1.0 - centerUV.y;
 #endif
 
-  // Skalierte Background-UV um echtes Shape-Zentrum
   vec2 scaledUV = centerUV + (screenUV - centerUV) / s;
 
-  // Normale aus Union-SDF (im SDF-Space)
-  vec2 grad2  = _unionGrad2_df(sdUnion);
+  // ──────────────── Child UV Projection ────────────────
+  // screenUV ist hier (effektiv) in PIXELN.
+  // uChildProjection wird in Dart so gesetzt, dass:
+  //   childUVRaw = (bounds.left / layerW, bounds.top / layerH)
+  //              + screenUV * (1 / layerW, 1 / layerH)
+  // → also globale Layer-UVs (0..1) für das backgroundChild.
+vec2 childUVRaw = uChildProjection.xy + screenUV * uChildProjection.zw;
+
+// bool insideChild =
+//     (childUVRaw.x >= 0.0) && (childUVRaw.x <= 1.0) &&
+//     (childUVRaw.y >= 0.0) && (childUVRaw.y <= 1.0);
+
+// vec4 childColor;
+// if (insideChild) {
+//   childColor = texture(uBackgroundChildTexture, childUVRaw);
+// } else {
+//   // Fallback: normaler Hintergrund an dieser Stelle
+//   childColor = texScreen(uBackgroundTexture, screenUV);
+// }
+
+// // Debug nur fürs BackgroundChild:
+// fragColor = childColor;
+// return;
+
+
+  vec2 grad2 = _unionGrad2_df(sdUnion);
   vec3 normal = _buildNormal3_fromUnion(sdUnion, grad2);
 
-  // Volle Liquid-Glass-Pipeline (Refraction + CA + Glow etc. in shared.glsl)
   fragColor = renderLiquidGlass(
-      scaledUV,             // screenUV (inkl. Background-Scale um Shape-Zentrum)
-      p,                    // p (SDF-Space, globale Device-Pixel)
-      uSize,                // uSizePx
-      sdUnion,              // sd
-      uThickness,           // thickness
-      uRefractiveIndex,     // refractiveIndex
-      uChromaticAberration, // chromaticAberration
-      uGlassColor,          // glassColor
-      uLightDirection,      // lightDirection
-      uLightIntensity,      // lightIntensity
-      uAmbientStrength,     // ambientStrength
-      uBackgroundTexture,   // backgroundTexture
-      normal,               // normal
-      foregroundAlpha,      // foregroundAlpha
-      uSaturation,          // saturation
-      uLightness,           // lightness
-      rimWidthPx,           // rimWidthPx
-      rimSharpness,         // rimSharpness
-      idx                   // currentShapeIdx
+    scaledUV,       // UV für Background (gezoomt)
+    childUVRaw,     // UV für backgroundChild
+    p,
+    uSize,
+    sdUnion,
+    uThickness,
+    uRefractiveIndex,
+    uChromaticAberration,
+    uGlassColor,
+    uLightDirection,
+    uLightIntensity,
+    uAmbientStrength,
+    uBackgroundTexture,
+    uBackgroundChildTexture,
+    normal,
+    foregroundAlpha,
+    uSaturation,
+    uLightness,
+    rimWidthPx,
+    rimSharpness,
+    idx
   );
 }

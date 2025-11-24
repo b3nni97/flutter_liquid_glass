@@ -2,8 +2,10 @@
 // ignore_for_file: avoid_setters_without_getters
 
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_shaders/flutter_shaders.dart';
@@ -11,25 +13,47 @@ import 'package:liquid_glass_renderer/src/glass_link.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_settings.dart';
 import 'package:liquid_glass_renderer/src/raw_shapes.dart';
+import 'package:liquid_glass_renderer/src/resolution_aware_animated_sampler.dart';
 import 'package:liquid_glass_renderer/src/shaders.dart';
 import 'package:meta/meta.dart';
+
+// NEU: Helferklasse für den Bildaustausch
+class _ImageHolder {
+  ui.Image? _image;
+  ui.Image? get image => _image;
+
+  void update(ui.Image newImage) {
+    _image?.dispose();
+    _image = newImage.clone();
+  }
+
+  void dispose() {
+    _image?.dispose();
+    _image = null;
+  }
+}
 
 /// A compositing layer that renders multiple [LiquidGlass] shapes which can
 /// visually merge and share a single [LiquidGlassSettings] configuration.
 ///
 /// Notes:
 /// - Requires Impeller (runtime shader + backdrop filter support). If runtime
-///   shader filters are not supported, this widget becomes a no-op pass-through.
+/// shader filters are not supported, this widget becomes a no-op pass-through.
 class LiquidGlassLayer extends StatefulWidget {
   const LiquidGlassLayer({
     required this.child,
     this.settings = const LiquidGlassSettings(),
     this.restrictThickness = true,
+    this.backgroundChild, // Optionales Widget für Reflektionen
     super.key,
   });
 
   /// The subtree that contains [LiquidGlass] shapes and arbitrary content.
   final Widget child;
+
+  /// Optionales Widget, das gesamplet wird und als Textur (Sampler 1)
+  /// an den Shader übergeben wird (z.B. für Environment Maps).
+  final Widget? backgroundChild;
 
   /// Rendering parameters for the liquid glass effect shared by all shapes.
   final LiquidGlassSettings settings;
@@ -60,6 +84,15 @@ class TouchPoint {
 
 class _LiquidGlassLayerState extends State<LiquidGlassLayer>
     with SingleTickerProviderStateMixin {
+  // Holder für das Reflection Image
+  final _ImageHolder _reflectionImageHolder = _ImageHolder();
+
+  @override
+  void dispose() {
+    _reflectionImageHolder.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!ImageFilter.isShaderFilterSupported) {
@@ -71,6 +104,9 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer>
       return widget.child;
     }
 
+    // Viewport-Größe über MediaQuery holen
+    final Size viewportSize = MediaQuery.sizeOf(context);
+
     // Build the shader pipeline:
     // 1) Load glass shader (liquid_glass.frag)
     // 2) Nest a horizontal 1D Gaussian blur shader (gauss1d_linear.frag)
@@ -79,15 +115,41 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer>
       assetKey: liquidGlassShader, // Main pass (liquid_glass.frag)
       (context, glassShader, child) => ShaderBuilder(
         assetKey: gaussian1dBlurShader, // H-pass (gauss1d_linear.frag)
-        (context, blurH, child) => _RawShapes(
-          shader: glassShader,
-          blurH: blurH,
-          settings: widget.settings,
-          debugRenderRefractionMap: false,
-          restrictThickness: widget.restrictThickness,
-          child: child!,
-        ),
-        child: child,
+        (context, blurH, child) {
+          // Das eigentliche Render-Widget (mit dem normalen Child)
+          Widget glassLayerWidget = _RawShapes(
+            shader: glassShader,
+            blurH: blurH,
+            settings: widget.settings,
+            debugRenderRefractionMap: false,
+            restrictThickness: widget.restrictThickness,
+            imageHolder: _reflectionImageHolder,
+            viewportSize: viewportSize,
+            child: widget.child,
+          );
+
+          // Wenn backgroundChild da ist, rendern wir sie im Hintergrund (unsichtbar)
+          if (widget.backgroundChild != null) {
+            return Stack(
+              fit: StackFit.passthrough,
+              children: [
+                // Reflection Source (wird gesamplet)
+                ResolutionAwareAnimatedSampler(
+                  (ui.Image image, Size size, Canvas canvas) {
+                    _reflectionImageHolder.update(image);
+                  },
+                  resolutionScale: Offset(1.18, 1.35),
+                  child: widget.backgroundChild!,
+                ),
+                // Glas Layer (sichtbar)
+                glassLayerWidget,
+              ],
+            );
+          }
+
+          return glassLayerWidget;
+        },
+        child: widget.child,
       ),
       child: widget.child,
     );
@@ -101,6 +163,8 @@ class _RawShapes extends SingleChildRenderObjectWidget {
     required this.settings,
     required this.debugRenderRefractionMap,
     required this.restrictThickness,
+    required this.imageHolder,
+    required this.viewportSize,
     required Widget super.child,
   });
 
@@ -110,6 +174,10 @@ class _RawShapes extends SingleChildRenderObjectWidget {
   final LiquidGlassSettings settings;
   final bool debugRenderRefractionMap;
   final bool restrictThickness;
+  final _ImageHolder imageHolder;
+
+  /// Viewport-Größe (logische Pixel), vom Widget-Layer durchgereicht.
+  final Size viewportSize;
 
   @override
   RenderObject createRenderObject(BuildContext context) {
@@ -120,6 +188,8 @@ class _RawShapes extends SingleChildRenderObjectWidget {
       settings: settings,
       debugRenderRefractionMap: debugRenderRefractionMap,
       restrictThickness: restrictThickness,
+      imageHolder: imageHolder,
+      viewportSize: viewportSize,
     );
   }
 
@@ -133,6 +203,8 @@ class _RawShapes extends SingleChildRenderObjectWidget {
       ..settings = settings
       ..debugRenderRefractionMap = debugRenderRefractionMap
       ..restrictThickness = restrictThickness
+      ..imageHolder = imageHolder
+      ..viewportSize = viewportSize
       ..setShaders(shader, blurH);
   }
 }
@@ -161,6 +233,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     required FragmentShader blurH,
     required LiquidGlassSettings settings,
     required bool restrictThickness,
+    required _ImageHolder imageHolder,
+    required Size viewportSize,
     bool debugRenderRefractionMap = false,
   })  : _devicePixelRatio = devicePixelRatio,
         _shader = shader,
@@ -168,41 +242,21 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
         _settings = settings,
         _debugRenderRefractionMap = debugRenderRefractionMap,
         _restrictThickness = restrictThickness,
+        _imageHolder = imageHolder,
+        _viewportSize = viewportSize,
         _glassLink = GlassLink() {
     _glassLink.addListener(_onGlassLinkChanged);
     _initHBlurInvariants();
   }
 
   // ───────────────── Uniform layout (sequential float indices) ──────────────
-  //  0..1    : uSize (vec2) [set by Flutter]
-  //  2..5    : uGlassColor (vec4)
-  //  6..9    : uOpticalProps (vec4)
-  // 10..13   : uLightConfig (vec4)
-  // 14..15   : uColorAdjust (vec2) => [14]=lightness, [15]=numShapes
-  // 16..17   : uLightDirection (vec2) => cos,sin
-  // 18..33   : uTransform (mat4)
-  // 34..35   : uRimParams (vec2)
-  // 36..131  : uShapeData (float[MAX_SHAPES*6])
-  // 132..135 : uBlurHeader (vec4) => dir.x, dir.y, sample_count, tile_mode
-  // 136..335 : u_samples[0..49] (vec4 per sample → 50 * 4 = 200 floats)
-  // 336      : uTouchCount_f (float)
-  // 337..368 : uTouches[8] (8 * vec4)
-  // 369..376 : uTouchOwners[8] (8 * float)
-  // 377..380 : uGlowParams (vec4)
-  // 381..384 : uGlowColor  (vec4)
-  // 385..388 : uGlowOverrides (vec4)
-  // 389..392 : uGlowFlags (vec4)
-  // 393..396 : uGlowGlass (vec4)
-  // 397      : uGlobalBlurSigma (float)
-  // 398..405 : uTouchGlowStrengths[8] (8 * float)
-  // 406      : uBgScale (float)
-  // 407..408 : uNormalParams (vec2) -> plateauWidth, softness
-  static const int _idxGlassColor = 2;
-  static const int _idxOpticalProps = 6;
-  static const int _idxLightConfig = 10;
+  // float[0..1]   → uSize (vec2)  [wird von Flutter/Runtime gesetzt]
+  static const int _idxGlassColor = 2; // vec4  → 2..5
+  static const int _idxOpticalProps = 6; // vec4  → 6..9
+  static const int _idxLightConfig = 10; // vec4 → 10..13
   static const int _idxColorAdjust = 14; // x: lightness, y: numShapes
   static const int _idxLightDir = 16;
-  static const int _idxTransform = 18;
+  static const int _idxTransform = 18; // mat4 → 18..33
   static const int _idxRimParams = 34;
 
   static const int _shapeDataBaseFloat = 36; // first float of uShapeData
@@ -227,6 +281,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   // Parameter für Normalen/Abschrägung (vec2)
   static const int _idxNormalParams = 407; // float
 
+  // Projection Uniform (vec4: offX, offY, scaleX, scaleY)
+  static const int _idxChildProjection = 409;
+
   static const double _eps = 0.01;
 
   final GlassLink _glassLink;
@@ -239,6 +296,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   LiquidGlassSettings _settings;
   bool _debugRenderRefractionMap;
   bool _restrictThickness;
+  _ImageHolder _imageHolder;
+
+  /// Viewport-Größe in logischen Pixeln (vom Widget-Layer gesetzt).
+  Size _viewportSize;
+
+  bool _loggedOnce = false; // Debug: nur einmal loggen
 
   // --- Setters ---
   set devicePixelRatio(double value) {
@@ -264,6 +327,18 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _restrictThickness = value;
     markNeedsPaint();
   }
+
+  set imageHolder(_ImageHolder value) {
+    if (identical(_imageHolder, value)) return;
+    _imageHolder = value;
+    markNeedsPaint();
+  }
+
+  set viewportSize(Size value) {
+    if (_viewportSize == value) return;
+    _viewportSize = value;
+    markNeedsPaint();
+  }
   // ------------------------------------
 
   // Cached kernels and state to minimize uniform uploads.
@@ -277,7 +352,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
   bool _hInvariantsInitialized = false;
 
-  // UPDATED: Nur noch ein Handle für den kombinierten BackdropFilter.
+  // BackdropFilter layer handle
   final LayerHandle<BackdropFilterLayer> _backdropHandle =
       LayerHandle<BackdropFilterLayer>();
 
@@ -309,6 +384,33 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _hInvariantsInitialized = true;
   }
 
+  /// Nicht-uniforme Skales (sx, sy) aus der Transform-Matrix extrahieren.
+  Offset _getScaleXY(Matrix4 transform) {
+    final m = transform.storage;
+
+    // Fast-path: kein Rotate/Skew.
+    if (m[1] == 0 && m[4] == 0) {
+      final sx = m[0].abs();
+      final sy = m[5].abs();
+      return Offset(sx, sy);
+    }
+
+    // General case: erste Spalte = X-Achse, zweite Spalte = Y-Achse.
+    final double a = m[0], b = m[1]; // X-Spalte
+    final double c = m[4], d = m[5]; // Y-Spalte
+
+    final double sx = math.sqrt(a * a + b * b);
+    final double sy = math.sqrt(c * c + d * d);
+
+    return Offset(sx, sy);
+  }
+
+  /// Uniformer Scale (für RawShape), aus sx/sy abgeleitet.
+  double _getScaleFromTransform(Matrix4 transform) {
+    final Offset s = _getScaleXY(transform);
+    return math.sqrt(s.dx * s.dy);
+  }
+
   /// Collects all [RawShape]s participating in this layer + lokale Touches je Shape.
   List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> collectShapes() {
     final result = <(RenderLiquidGlass, RawShape, List<TouchPoint>)>[];
@@ -330,27 +432,11 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
             size: s.globalBounds.size,
             scale: scale,
           ),
-          ro.localTouches, // ← lokale Touches des Shapes (implizit)
+          ro.localTouches,
         ));
       }
     }
     return result;
-  }
-
-  /// Extracts a uniform scale factor from the given transform matrix.
-  double _getScaleFromTransform(Matrix4 transform) {
-    final m = transform.storage;
-    // Fast-path: no rotation/skew.
-    if (m[1] == 0 && m[4] == 0) {
-      final sx = m[0].abs();
-      final sy = m[5].abs();
-      return math.sqrt(sx * sy);
-    }
-    // General case.
-    final a = m[0], b = m[1], c = m[4], d = m[5];
-    final scaleXSq = a * a + b * b;
-    final scaleYSq = c * c + d * d;
-    return math.sqrt(math.sqrt(scaleXSq * scaleYSq));
   }
 
   // Impeller constraints and numeric helpers for kernel synthesis.
@@ -444,7 +530,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   }
 
   bool _shapesChanged(
-      List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes) {
+    List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes,
+  ) {
     final shapeList = shapes.map((e) => e.$2).toList(growable: false);
     if (_lastShapes == null || _lastShapes!.length != shapeList.length) {
       _lastShapes = shapeList;
@@ -483,13 +570,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     return false;
   }
 
-  static final List<double> _identityMat4 = <double>[
-    1, 0, 0, 0, //
-    0, 1, 0, 0, //
-    0, 0, 1, 0, //
-    0, 0, 0, 1,
-  ];
-
   /// Interne Struktur: Touch + Owner-Index.
   List<_OwnedTouch> _combineTouches(
     List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes,
@@ -499,16 +579,100 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       final local = shapes[i].$3;
       if (local.isEmpty) continue;
       for (final lt in local) {
-        combined.add(_OwnedTouch(
-          position: lt.position,
-          radiusPx: lt.radiusPx,
-          fadePx: lt.fadePx,
-          glowStrength: lt.glowStrength,
-          ownerIndex: i, // dieser Touch gehört Shape i
-        ));
+        combined.add(
+          _OwnedTouch(
+            position: lt.position,
+            radiusPx: lt.radiusPx,
+            fadePx: lt.fadePx,
+            glowStrength: lt.glowStrength,
+            ownerIndex: i,
+          ),
+        );
       }
     }
     return combined;
+  }
+
+  /// Echte Glas-Bounds + Clip-/Blur-Bounds (mit Margin) in EINEM Loop.
+  (Rect unionBounds, Rect clipBounds) _computeUnionAndClipRect(
+    List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes,
+  ) {
+    Rect? union;
+    for (final (ro, _, __) in shapes) {
+      final transformToThis = ro.getTransformTo(this);
+      final rectLocal =
+          MatrixUtils.transformRect(transformToThis, Offset.zero & ro.size);
+      union = (union == null) ? rectLocal : union!.expandToInclude(rectLocal);
+    }
+    final Rect unionBounds = union ?? Rect.zero;
+    final double margin = (_settings.blur * 3.0) + _settings.thickness + 12.0;
+    final Rect clipBounds = unionBounds.inflate(margin);
+
+    return (unionBounds, clipBounds);
+  }
+
+  /// Neu: Bounds (mit Margin) im globalen Viewport clampen.
+  Rect _clampBoundsToViewport(Rect bounds, Offset layerOffset) {
+    // bounds: im lokalen Koordinatensystem des Layers
+    // layerOffset: Offset, mit dem der Layer gepaintet wird
+    final Rect global = bounds.shift(layerOffset);
+    final Rect viewport = Offset.zero & _viewportSize;
+
+    final double clampedLeft = global.left.clamp(viewport.left, viewport.right);
+    final double clampedTop = global.top.clamp(viewport.top, viewport.bottom);
+    final double clampedRight =
+        global.right.clamp(viewport.left, viewport.right);
+    final double clampedBottom =
+        global.bottom.clamp(viewport.top, viewport.bottom);
+
+    // Falls komplett außerhalb → leeres Rect, verhindert komische Effekte.
+    if (clampedRight <= clampedLeft || clampedBottom <= clampedTop) {
+      return Rect.zero;
+    }
+
+    final Rect clampedGlobal = Rect.fromLTRB(
+      clampedLeft,
+      clampedTop,
+      clampedRight,
+      clampedBottom,
+    );
+
+    // Zurück in Layer-Koordinaten
+    return clampedGlobal.shift(-layerOffset);
+  }
+
+  /// Snap a rectangle to device pixels to avoid half-pixel sampling seams.
+  Rect _snapRectToDeviceFull(Rect r) {
+    final d = _devicePixelRatio;
+    double f(double v) => (v * d).floorToDouble() / d;
+    double c(double v) => (v * d).ceilToDouble() / d;
+    return Rect.fromLTRB(f(r.left), f(r.top), c(r.right), c(r.bottom));
+  }
+
+  Path _computeUnionClipPath(
+    List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes,
+  ) {
+    final path = Path();
+    for (final (ro, raw, _) in shapes) {
+      final Matrix4 toThis = ro.getTransformTo(this);
+      final Rect rectLocal =
+          MatrixUtils.transformRect(toThis, Offset.zero & ro.size);
+      if (raw.type == RawShapeType.ellipse) {
+        path.addOval(rectLocal);
+      } else {
+        final r = Radius.circular(raw.cornerRadius);
+        path.addRRect(
+          RRect.fromRectAndCorners(
+            rectLocal,
+            topLeft: r,
+            topRight: r,
+            bottomLeft: r,
+            bottomRight: r,
+          ),
+        );
+      }
+    }
+    return path;
   }
 
   /// Uploads all uniforms required for the current frame if settings, shapes,
@@ -519,9 +683,26 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     int nKernel,
     List<_PackedS> kernel,
     List<_OwnedTouch> ownedTouches,
-    Rect bounds, // ← NEU
-    Offset offset, // ← NEU
+    Rect bounds, // Clip/Blur-Bounds (mit Margin)
+    Offset offset,
+    Rect unionBounds, // Glas-Bounds (ohne Margin)
+    Offset glassScale, // nur als Parameter
   ) {
+    // // ===== Logging aller Parameter + abgeleiteter Werte =====
+    // debugPrint('======== uploadUniformsIfNeeded ========');
+    // debugPrint('shapeCount    : $shapeCount');
+    // debugPrint('nKernel       : $nKernel');
+    // debugPrint('bounds        : $bounds');
+    // debugPrint('unionBounds   : $unionBounds');
+    // debugPrint('offset        : $offset');
+    // debugPrint('glassScale    : $glassScale');
+    // debugPrint('viewportSize  : $_viewportSize');
+    // debugPrint('layer size    : $size');
+    // debugPrint('devicePixelRatio: $_devicePixelRatio');
+    // debugPrint('settings      : $_settings');
+    // debugPrint('ownedTouches  : ${ownedTouches.length}');
+    // debugPrint('========================================');
+
     final settingsChanged = _lastSettings != _settings;
     final shapesChanged = _shapesChanged(shapes);
 
@@ -543,6 +724,48 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     final double tx = actualGlobalLeft * dpr;
     final double ty = actualGlobalTop * dpr;
     final Matrix4 transform = Matrix4.translationValues(tx, ty, 0);
+
+    // --- Projection (child) ---
+    // 1. Safety Checks (Layout dimensions & Glass Scale)
+    final double layerW = size.width > 0 ? size.width : 1.0;
+    final double layerH = size.height > 0 ? size.height : 1.0;
+    final double gsX = (glassScale.dx != 0) ? glassScale.dx : 1.0;
+    final double gsY = gsX;
+    (glassScale.dy != 0) ? glassScale.dy : 1.0;
+    // 2. Scale Calculation:
+    // We calculate how large the render bounds are relative to the layer,
+    // then divide by glassScale to compensate for the glass "zoom".
+    final double scaleX = (bounds.width / layerW) / gsX;
+    final double scaleY = (bounds.height / layerH) / gsY;
+
+    // 3. Offset Calculation (Shape-Centric):
+    // Ignore the bounds center (which might be asymmetric due to blur margins).
+    // Instead, anchor the texture center (0.5) to the unionBounds (shape) center.
+
+    // Where is the shape center relative to the bounds? (0.0 to 1.0)
+    final double relCenterX =
+        (unionBounds.center.dx - bounds.left) / bounds.width;
+    final double relCenterY =
+        (unionBounds.center.dy - bounds.top) / bounds.height;
+
+    // Calculate offset so that the texture maps 0.5 to this relative center.
+    // Formula: 0.5 = Offset + (RelCenter * Scale)
+    final double offX = 0.5 - (relCenterX * scaleX);
+    final double offY = 0.5 - (relCenterY * scaleY);
+
+    // Debug output for comparison
+    // debugPrint('--- Projection (Shape Centered) ---');
+    // debugPrint(
+    //     'offX/offY    : ${offX.toStringAsFixed(4)} / ${offY.toStringAsFixed(4)}');
+    // debugPrint(
+    //     'scaleX/Y     : ${scaleX.toStringAsFixed(4)} / ${scaleY.toStringAsFixed(4)}');
+    // debugPrint('===============================');
+
+    _shader
+      ..setFloat(_idxChildProjection + 0, offX)
+      ..setFloat(_idxChildProjection + 1, offY)
+      ..setFloat(_idxChildProjection + 2, scaleX)
+      ..setFloat(_idxChildProjection + 3, scaleY);
 
     if (settingsChanged || shapesChanged) {
       _shader
@@ -587,13 +810,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
           ..setFloat(base + 5, shape.cornerRadius * _devicePixelRatio);
       }
 
-      // ── Spiegel die relevanten Uniforms in den H-Pass ────────────────────
+      // Spiegel die relevanten Uniforms in den H-Pass
       _blurH
         ..setFloat(_idxOpticalProps + 0, _settings.refractiveIndex)
         ..setFloat(_idxOpticalProps + 1, _settings.chromaticAberration)
         ..setFloat(_idxOpticalProps + 2, thickness)
         ..setFloat(_idxOpticalProps + 3, _settings.blend * _devicePixelRatio)
-        // WICHTIG: uColorAdjust.x = lightness, uColorAdjust.y = numShapes
         ..setFloat(_idxColorAdjust + 0, _settings.lightness)
         ..setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
 
@@ -743,59 +965,13 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     );
   }
 
-  /// Snap a rectangle to device pixels to avoid half-pixel sampling seams.
-  Rect _snapRectToDeviceFull(Rect r) {
-    final d = _devicePixelRatio;
-    double f(double v) => (v * d).floorToDouble() / d;
-    double c(double v) => (v * d).ceilToDouble() / d;
-    return Rect.fromLTRB(f(r.left), f(r.top), c(r.right), c(r.bottom));
-  }
-
-  Path _computeUnionClipPath(
-      List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes) {
-    final path = Path();
-    for (final (ro, raw, _) in shapes) {
-      final Matrix4 toThis = ro.getTransformTo(this);
-      final Rect rectLocal =
-          MatrixUtils.transformRect(toThis, Offset.zero & ro.size);
-      if (raw.type == RawShapeType.ellipse) {
-        path.addOval(rectLocal);
-      } else {
-        final r = Radius.circular(raw.cornerRadius);
-        path.addRRect(
-          RRect.fromRectAndCorners(
-            rectLocal,
-            topLeft: r,
-            topRight: r,
-            bottomLeft: r,
-            bottomRight: r,
-          ),
-        );
-      }
-    }
-    return path;
-  }
-
-  Rect _computeUnionClipRect(
-      List<(RenderLiquidGlass, RawShape, List<TouchPoint>)> shapes) {
-    Rect? union;
-    for (final (ro, _, __) in shapes) {
-      final transformToThis = ro.getTransformTo(this);
-      final rectLocal =
-          MatrixUtils.transformRect(transformToThis, Offset.zero & ro.size);
-      union = (union == null) ? rectLocal : union!.expandToInclude(rectLocal);
-    }
-    final double margin = (_settings.blur * 3.0) + _settings.thickness + 12.0;
-    return (union ?? Rect.zero).inflate(margin);
-  }
-
   @override
   void paint(PaintingContext context, Offset offset) {
     final shapes = collectShapes();
 
     // Early exit if the effect is disabled or there is nothing to render.
     if (_settings.thickness <= 0 || shapes.isEmpty) {
-      _backdropHandle.layer = null; // Clear single handle
+      _backdropHandle.layer = null;
       _paintShapeContents(context, offset, shapes, glassContainsChild: true);
       _paintShapeContents(context, offset, shapes, glassContainsChild: false);
       super.paint(context, offset);
@@ -812,7 +988,43 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     final ownedTouches = _combineTouches(shapes);
 
     // Bounds werden vor Uniform-Upload berechnet und übergeben.
-    final Rect bounds = _snapRectToDeviceFull(_computeUnionClipRect(shapes));
+    var (unionBounds, clipBounds) =
+        _computeUnionAndClipRect(shapes); // ein Pass
+    // unionBounds = _clampBoundsToViewport(unionBounds, offset);
+    clipBounds = _clampBoundsToViewport(clipBounds, offset);
+
+    final Rect bounds = _snapRectToDeviceFull(clipBounds); // mit Margin
+
+    // Glas-Scale aus erstem Shape (falls vorhanden)
+    Offset glassScale = const Offset(1.0, 1.0);
+    if (shapes.isNotEmpty) {
+      final RenderLiquidGlass ro0 = shapes.first.$1;
+      final Matrix4 t0 = ro0.getTransformTo(this);
+      glassScale = _getScaleXY(t0);
+    }
+
+    // // Debug: zeichne Bounds & unionBounds
+    // final Canvas debugCanvas = context.canvas;
+    // debugCanvas.save();
+    // debugCanvas.translate(offset.dx, offset.dy);
+
+    // debugCanvas.drawRect(
+    //   bounds,
+    //   Paint()
+    //     ..style = PaintingStyle.stroke
+    //     ..strokeWidth = 1.0
+    //     ..color = const Color(0xFFFF00FF),
+    // );
+
+    // debugCanvas.drawRect(
+    //   unionBounds,
+    //   Paint()
+    //     ..style = PaintingStyle.stroke
+    //     ..strokeWidth = 1.0
+    //     ..color = const Color(0xFF00FFFF),
+    // );
+
+    // debugCanvas.restore();
 
     _uploadUniformsIfNeeded(
       shapeCount,
@@ -822,15 +1034,24 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       ownedTouches,
       bounds,
       offset,
+      unionBounds,
+      glassScale,
     );
+
+    // Reflection Image (Sampler 1) setzen, falls vorhanden
+    if (_imageHolder.image != null) {
+      try {
+        _shader.setImageSampler(1, _imageHolder.image!);
+      } catch (_) {
+        // Ignore lifecycle errors
+      }
+    }
 
     // ABOVE the glass first.
     _paintShapeContents(context, offset, shapes, glassContainsChild: true);
 
-    // UPDATED: Use ImageFilter.compose with a single LayerHandle
-    // "inner" (blurH) wird zuerst ausgeführt, dann "outer" (shader/glass) auf das Ergebnis.
-    // Das garantiert, dass der horizontale Pass nicht verschluckt wird.
-    ImageFilter? composedFilter;
+    // Use ImageFilter.compose mit einem LayerHandle
+    ImageFilter composedFilter;
 
     if (sigmaPx > 0.01 && nKernel > 0) {
       composedFilter = ImageFilter.compose(
@@ -851,13 +1072,16 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       offset,
       bounds,
       (ctxRect, offRect) {
-        ctxRect.pushLayer(backdropLayer, (childCtx, childOff) {
-          // Ein transparenter Rect reicht, um den Filter anzuwenden.
-          childCtx.canvas.drawRect(
-            bounds.shift(-childOff),
-            Paint()..color = const Color(0x00000000),
-          );
-        }, offRect);
+        ctxRect.pushLayer(
+          backdropLayer,
+          (childCtx, childOff) {
+            childCtx.canvas.drawRect(
+              bounds.shift(-childOff),
+              Paint()..color = const Color(0x00000000),
+            );
+          },
+          offRect,
+        );
       },
       clipBehavior: Clip.hardEdge,
     );
@@ -874,7 +1098,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _glassLink
       ..removeListener(_onGlassLinkChanged)
       ..dispose();
-    _backdropHandle.layer = null; // Dispose single handle
+    _backdropHandle.layer = null;
     super.dispose();
   }
 
