@@ -13,18 +13,23 @@ import 'package:liquid_glass_renderer/src/glass_link.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_settings.dart';
 import 'package:liquid_glass_renderer/src/raw_shapes.dart';
-import 'package:liquid_glass_renderer/src/resolution_aware_animated_sampler.dart';
+import 'package:liquid_glass_renderer/src/background_child_sampler.dart';
 import 'package:liquid_glass_renderer/src/shaders.dart';
 import 'package:meta/meta.dart';
 
 // NEU: Helferklasse für den Bildaustausch
 class _ImageHolder {
   ui.Image? _image;
-  ui.Image? get image => _image;
+  Size _size = Size.zero; // <--- NEU: Größe speichern
 
-  void update(ui.Image newImage) {
+  ui.Image? get image => _image;
+  Size get size => _size; // <--- NEU
+
+  void update(ui.Image newImage, Size newSize) {
+    // <--- Signatur angepasst
     _image?.dispose();
     _image = newImage.clone();
+    _size = newSize; // <--- NEU
   }
 
   void dispose() {
@@ -53,7 +58,7 @@ class LiquidGlassLayer extends StatefulWidget {
 
   /// Optionales Widget, das gesamplet wird und als Textur (Sampler 1)
   /// an den Shader übergeben wird (z.B. für Environment Maps).
-  final Widget? backgroundChild;
+  final LiquidGlassBackgroundChild? backgroundChild;
 
   /// Rendering parameters for the liquid glass effect shared by all shapes.
   final LiquidGlassSettings settings;
@@ -134,11 +139,17 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer>
               fit: StackFit.passthrough,
               children: [
                 // Reflection Source (wird gesamplet)
-                ResolutionAwareAnimatedSampler(
+                BackgroundChildSampler(
                   (ui.Image image, Size size, Canvas canvas) {
-                    _reflectionImageHolder.update(image);
+                    // print(size); // Debug print entfernt für Production
+                    _reflectionImageHolder.update(
+                        image, size); // <--- Size übergeben
                   },
-                  resolutionScale: Offset(1.18, 1.35),
+                  // FIX 1: Native Auflösung (1.0).
+                  // Durch unsere Änderung im Sampler bedeutet ein Offset > 1.0
+                  // jetzt "Größerer Viewport", nicht "Zoom".
+                  // Du kannst hier auch Offset(1.5, 1.5) nutzen, wenn du mehr Rand brauchst.
+                  // resolutionScale: const Offset(2, 2),
                   child: widget.backgroundChild!,
                 ),
                 // Glas Layer (sichtbar)
@@ -283,6 +294,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
   // Projection Uniform (vec4: offX, offY, scaleX, scaleY)
   static const int _idxChildProjection = 409;
+  // NEU: Child Size Uniform (vec2: width, height)
+  static const int _idxChildSize = 413;
 
   static const double _eps = 0.01;
 
@@ -300,8 +313,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
   /// Viewport-Größe in logischen Pixeln (vom Widget-Layer gesetzt).
   Size _viewportSize;
-
-  bool _loggedOnce = false; // Debug: nur einmal loggen
 
   // --- Setters ---
   set devicePixelRatio(double value) {
@@ -688,21 +699,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     Rect unionBounds, // Glas-Bounds (ohne Margin)
     Offset glassScale, // nur als Parameter
   ) {
-    // // ===== Logging aller Parameter + abgeleiteter Werte =====
-    // debugPrint('======== uploadUniformsIfNeeded ========');
-    // debugPrint('shapeCount    : $shapeCount');
-    // debugPrint('nKernel       : $nKernel');
-    // debugPrint('bounds        : $bounds');
-    // debugPrint('unionBounds   : $unionBounds');
-    // debugPrint('offset        : $offset');
-    // debugPrint('glassScale    : $glassScale');
-    // debugPrint('viewportSize  : $_viewportSize');
-    // debugPrint('layer size    : $size');
-    // debugPrint('devicePixelRatio: $_devicePixelRatio');
-    // debugPrint('settings      : $_settings');
-    // debugPrint('ownedTouches  : ${ownedTouches.length}');
-    // debugPrint('========================================');
-
     final settingsChanged = _lastSettings != _settings;
     final shapesChanged = _shapesChanged(shapes);
 
@@ -729,43 +725,52 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     // 1. Safety Checks (Layout dimensions & Glass Scale)
     final double layerW = size.width > 0 ? size.width : 1.0;
     final double layerH = size.height > 0 ? size.height : 1.0;
-    final double gsX = (glassScale.dx != 0) ? glassScale.dx : 1.0;
-    final double gsY = gsX;
-    (glassScale.dy != 0) ? glassScale.dy : 1.0;
-    // 2. Scale Calculation:
-    // We calculate how large the render bounds are relative to the layer,
-    // then divide by glassScale to compensate for the glass "zoom".
-    final double scaleX = (bounds.width / layerW) / gsX;
-    final double scaleY = (bounds.height / layerH) / gsY;
+    // 2. Scale Calculation (Kein Zoom, nur Bounds-Relation)
+    final double projScaleX = bounds.width / layerW;
+    final double projScaleY = bounds.height / layerH;
 
-    // 3. Offset Calculation (Shape-Centric):
-    // Ignore the bounds center (which might be asymmetric due to blur margins).
-    // Instead, anchor the texture center (0.5) to the unionBounds (shape) center.
+    // 3. Offset Calculation (Automatisches Zentrieren der Textur)
+    final double texPhysW = _imageHolder.size.width;
+    final double texPhysH = _imageHolder.size.height;
+    double calculatedOffX = 0.0;
+    double calculatedOffY = 0.0;
 
-    // Where is the shape center relative to the bounds? (0.0 to 1.0)
-    final double relCenterX =
-        (unionBounds.center.dx - bounds.left) / bounds.width;
-    final double relCenterY =
-        (unionBounds.center.dy - bounds.top) / bounds.height;
+    if (texPhysW > 0 && texPhysH > 0) {
+      // Umrechnen in logische Pixel
+      final double texLogW = texPhysW / _devicePixelRatio;
+      final double texLogH = texPhysH / _devicePixelRatio;
 
-    // Calculate offset so that the texture maps 0.5 to this relative center.
-    // Formula: 0.5 = Offset + (RelCenter * Scale)
-    final double offX = 0.5 - (relCenterX * scaleX);
-    final double offY = 0.5 - (relCenterY * scaleY);
+      // Mittelpunkte berechnen
+      final double layerCenterX = size.width / 2.0;
+      final double layerCenterY = size.height / 2.0;
+      final double texCenterX = texLogW / 2.0;
+      final double texCenterY = texLogH / 2.0;
 
-    // Debug output for comparison
-    // debugPrint('--- Projection (Shape Centered) ---');
-    // debugPrint(
-    //     'offX/offY    : ${offX.toStringAsFixed(4)} / ${offY.toStringAsFixed(4)}');
-    // debugPrint(
-    //     'scaleX/Y     : ${scaleX.toStringAsFixed(4)} / ${scaleY.toStringAsFixed(4)}');
-    // debugPrint('===============================');
+      // Layer-Ursprung (0,0) in der Textur finden
+      final double layerOriginInTexX = texCenterX - layerCenterX;
+      final double layerOriginInTexY = texCenterY - layerCenterY;
+
+      // Startpunkt der Render-Bounds in der Textur
+      final double startPixelX = layerOriginInTexX + bounds.left;
+      final double startPixelY = layerOriginInTexY + bounds.top;
+
+      // Normalisieren zu UV
+      calculatedOffX = startPixelX / texLogW;
+      calculatedOffY = startPixelY / texLogH;
+    }
 
     _shader
-      ..setFloat(_idxChildProjection + 0, offX)
-      ..setFloat(_idxChildProjection + 1, offY)
-      ..setFloat(_idxChildProjection + 2, scaleX)
-      ..setFloat(_idxChildProjection + 3, scaleY);
+      ..setFloat(_idxChildProjection + 0, calculatedOffX)
+      ..setFloat(_idxChildProjection + 1, calculatedOffY)
+      ..setFloat(_idxChildProjection + 2, projScaleX)
+      ..setFloat(_idxChildProjection + 3, projScaleY);
+
+    // FIX 3: Child Size hochladen (Zwingend für RGSS / Präzision im Shader)
+    final double cw = texPhysW > 0 ? texPhysW : 100.0;
+    final double ch = texPhysH > 0 ? texPhysH : 100.0;
+    _shader
+      ..setFloat(_idxChildSize + 0, cw)
+      ..setFloat(_idxChildSize + 1, ch);
 
     if (settingsChanged || shapesChanged) {
       _shader
@@ -993,7 +998,10 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     // unionBounds = _clampBoundsToViewport(unionBounds, offset);
     clipBounds = _clampBoundsToViewport(clipBounds, offset);
 
-    final Rect bounds = _snapRectToDeviceFull(clipBounds); // mit Margin
+    // FIX 4: KEIN Snapping der Bounds mehr!
+    // Wenn der Container "springt", springt auch die Projection -> Jitter.
+    // Wir nutzen weiche Float-Bounds.
+    final Rect bounds = clipBounds;
 
     // Glas-Scale aus erstem Shape (falls vorhanden)
     Offset glassScale = const Offset(1.0, 1.0);
@@ -1002,29 +1010,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       final Matrix4 t0 = ro0.getTransformTo(this);
       glassScale = _getScaleXY(t0);
     }
-
-    // // Debug: zeichne Bounds & unionBounds
-    // final Canvas debugCanvas = context.canvas;
-    // debugCanvas.save();
-    // debugCanvas.translate(offset.dx, offset.dy);
-
-    // debugCanvas.drawRect(
-    //   bounds,
-    //   Paint()
-    //     ..style = PaintingStyle.stroke
-    //     ..strokeWidth = 1.0
-    //     ..color = const Color(0xFFFF00FF),
-    // );
-
-    // debugCanvas.drawRect(
-    //   unionBounds,
-    //   Paint()
-    //     ..style = PaintingStyle.stroke
-    //     ..strokeWidth = 1.0
-    //     ..color = const Color(0xFF00FFFF),
-    // );
-
-    // debugCanvas.restore();
 
     _uploadUniformsIfNeeded(
       shapeCount,

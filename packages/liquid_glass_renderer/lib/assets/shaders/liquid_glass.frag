@@ -42,6 +42,7 @@ layout(location = 340) uniform vec2 uNormalParams;
 // xy = Offset (0..1), zw = Scale (⚠ wird in Dart so gesetzt,
 //     dass screenUV in PIXELN hereinkommt)
 layout(location = 409) uniform vec4 uChildProjection;
+layout(location = 413) uniform vec2 uChildSize;
 
 // ───────────────────── Textures ─────────────────────
 uniform sampler2D uBackgroundTexture;
@@ -96,8 +97,13 @@ void main() {
   // → screenUV == pScreen (Pixel-Koordinaten)
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
   vec2 screenUV = pScreen * invSize;
+
+  vec2 invChildSize = vec2(1.0) / max(uChildSize, vec2(1.0));
+  vec2 childUV = pScreen * invChildSize;
+
 #ifdef IMPELLER_TARGET_OPENGLES
   screenUV.y = 1.0 - screenUV.y;
+  childUV.y = 1.0 - childUV.y;
 #endif
 
   // p: globale Device-Pixel-Koordinate relativ zum Layer-Ursprung
@@ -139,23 +145,7 @@ void main() {
   //   childUVRaw = (bounds.left / layerW, bounds.top / layerH)
   //              + screenUV * (1 / layerW, 1 / layerH)
   // → also globale Layer-UVs (0..1) für das backgroundChild.
-vec2 childUVRaw = uChildProjection.xy + screenUV * uChildProjection.zw;
-
-// bool insideChild =
-//     (childUVRaw.x >= 0.0) && (childUVRaw.x <= 1.0) &&
-//     (childUVRaw.y >= 0.0) && (childUVRaw.y <= 1.0);
-
-// vec4 childColor;
-// if (insideChild) {
-//   childColor = texture(uBackgroundChildTexture, childUVRaw);
-// } else {
-//   // Fallback: normaler Hintergrund an dieser Stelle
-//   childColor = texScreen(uBackgroundTexture, screenUV);
-// }
-
-// // Debug nur fürs BackgroundChild:
-// fragColor = childColor;
-// return;
+vec2 childUVRaw =  uChildProjection.xy + childUV;// * uChildProjection.zw;
 
 
   vec2 grad2 = _unionGrad2_df(sdUnion);
