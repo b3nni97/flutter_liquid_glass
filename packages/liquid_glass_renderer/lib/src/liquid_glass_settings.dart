@@ -123,7 +123,7 @@ class GlowStyle with EquatableMixin {
 /// - Basiswerte definieren den Default-Look.
 /// - `glow` steuert sowohl Glow als auch optionale per-Bereich-Overrides.
 /// - `backgroundScale` skaliert den durchscheinenden/refraktierten Hintergrund
-///   innerhalb der Shapes (1.0 = unverändert, >1 = Zoom-in, <1 = Zoom-out).
+///   innerhalb der Shapes (Offset: 1,1 = unverändert, >1 = Zoom-in, <1 = Zoom-out).
 class LiquidGlassSettings with EquatableMixin {
   /// Standard-Konstruktor.
   const LiquidGlassSettings({
@@ -142,8 +142,8 @@ class LiquidGlassSettings with EquatableMixin {
     this.rimSharpness = 0.9,
     this.glow = const GlowStyle(),
 
-    // globaler Skalierungsfaktor für den Hintergrund im Shape
-    this.backgroundScale = 1.0,
+    // globaler Skalierungsfaktor für den Hintergrund im Shape (x, y)
+    this.backgroundScale = const Offset(1.0, 1.0),
 
     // Parameter für die Normalen/Abschrägung
     this.normalPlateauWidth = 24.0,
@@ -180,7 +180,7 @@ class LiquidGlassSettings with EquatableMixin {
           rimWidthPx: rimWidthPx,
           rimSharpness: rimSharpness,
           glow: glow,
-          // backgroundScale bleibt beim Default 1.0
+          // backgroundScale bleibt beim Default Offset(1,1)
           // normalPlateauWidth & normalSoftness bleiben bei ihren Defaults
         );
 
@@ -229,8 +229,8 @@ class LiquidGlassSettings with EquatableMixin {
   final GlowStyle glow;
 
   /// Skalierung des durchscheinenden Hintergrunds innerhalb der Shapes.
-  /// 1.0 = unverändert, >1 = Zoom-in, <1 = Zoom-out.
-  final double backgroundScale;
+  /// Offset(1,1) = unverändert, >1 = Zoom-in, <1 = Zoom-out (pro Achse).
+  final Offset backgroundScale;
 
   /// Breite des Plateaus für die Normalen/Abschrägung (px).
   final double normalPlateauWidth;
@@ -255,7 +255,7 @@ class LiquidGlassSettings with EquatableMixin {
     double? rimWidthPx,
     double? rimSharpness,
     GlowStyle? glow,
-    double? backgroundScale,
+    Offset? backgroundScale,
     double? normalPlateauWidth,
     double? normalSoftness,
   }) {
@@ -309,7 +309,7 @@ class LiquidGlassSettings with EquatableMixin {
       // Glow via eigene Lerp
       glow: GlowStyle.lerp(a.glow, b.glow, t),
 
-      backgroundScale: lerpDouble(a.backgroundScale, b.backgroundScale, t)!,
+      backgroundScale: Offset.lerp(a.backgroundScale, b.backgroundScale, t)!,
       normalPlateauWidth:
           lerpDouble(a.normalPlateauWidth, b.normalPlateauWidth, t)!,
       normalSoftness: lerpDouble(a.normalSoftness, b.normalSoftness, t)!,

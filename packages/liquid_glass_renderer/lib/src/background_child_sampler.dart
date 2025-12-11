@@ -253,10 +253,10 @@ class _ShaderSamplerBuilderLayer extends OffsetLayer {
   @override
   void addToScene(ui.SceneBuilder builder) {
     if (size.isEmpty) return;
-
+    final bounds = offset & Size(size.width, size.height);
     // Übergabe von resolutionScale an den Build-Prozess
     final ui.Image image = _buildChildScene(
-      offset & Size(size.width, size.height),
+      bounds,
       devicePixelRatio,
       scale,
     );
@@ -266,7 +266,15 @@ class _ShaderSamplerBuilderLayer extends OffsetLayer {
     try {
       // Callback erhält die physische Größe des neuen (größeren) Bildes
       callback(
-          image, Size(image.width.toDouble(), image.height.toDouble()), canvas);
+        image,
+        Size(
+            (devicePixelRatio * scale.dx * bounds.width)
+                .floorToDouble(), //  image.width.toDouble(),
+            (devicePixelRatio * scale.dy * bounds.height)
+                .floorToDouble() //  image.height.toDouble(),
+            ),
+        canvas,
+      );
     } finally {
       image.dispose();
     }

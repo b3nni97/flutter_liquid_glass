@@ -7,10 +7,10 @@ import 'package:meta/meta.dart';
 
 @internal
 enum RawShapeType {
-  none,
-  squircle,
-  ellipse,
-  roundedRectangle,
+  none, // 0
+  squircle, // 1 (Figma Style & Legacy Auto)
+  ellipse, // 2
+  roundedRectangle, // 3
 }
 
 @internal
@@ -20,37 +20,47 @@ class RawShape with EquatableMixin {
     required this.center,
     required this.size,
     required this.cornerRadius,
+    this.cornerSmoothing,
   });
 
   factory RawShape.fromLiquidGlassShape(
     LiquidShape shape, {
     required Offset center,
     required Size size,
-    double scale = 1.0, // <-- NEU: effektiver Scale aus Transform
+    double scale = 1.0,
   }) {
     switch (shape) {
+      // Konsolidierter Squircle (Type 1)
+      // Behandelt sowohl den Auto-Modus (cornerSmoothing == null)
+      // als auch den Figma-Modus (cornerSmoothing != null).
       case LiquidRoundedSuperellipse():
         _assertSameRadius(shape.borderRadius);
         return RawShape(
           type: RawShapeType.squircle,
           center: center,
           size: size,
-          cornerRadius: shape.borderRadius.x * scale, // <-- skaliert
+          cornerRadius: shape.borderRadius.x * scale,
+          // Wir reichen den Wert einfach durch.
+          // null -> Shader nutzt Auto-Logic (-1.0).
+          // 0.0-1.0 -> Shader nutzt Figma-Logic.
+          cornerSmoothing: shape.cornerSmoothing,
         );
+
       case LiquidOval():
         return RawShape(
-          type: RawShapeType.ellipse,
+          type: RawShapeType.ellipse, // Type 2
           center: center,
           size: size,
           cornerRadius: 0,
         );
+
       case LiquidRoundedRectangle():
         _assertSameRadius(shape.borderRadius);
         return RawShape(
-          type: RawShapeType.roundedRectangle,
+          type: RawShapeType.roundedRectangle, // Type 3
           center: center,
           size: size,
-          cornerRadius: shape.borderRadius.x * scale, // <-- skaliert
+          cornerRadius: shape.borderRadius.x * scale,
         );
     }
   }
@@ -67,13 +77,18 @@ class RawShape with EquatableMixin {
   final Size size;
   final double cornerRadius;
 
+  /// Controls the smoothness (0.0 - 1.0).
+  /// If null, the shader uses the legacy auto-calculation logic (-1.0).
+  final double? cornerSmoothing;
+
   Offset get topLeft =>
       Offset(center.dx - size.width / 2, center.dy - size.height / 2);
 
   Rect get rect => topLeft & size;
 
   @override
-  List<Object?> get props => [type, center, size, cornerRadius];
+  List<Object?> get props =>
+      [type, center, size, cornerRadius, cornerSmoothing];
 }
 
 void _assertSameRadius(Radius borderRadius) {

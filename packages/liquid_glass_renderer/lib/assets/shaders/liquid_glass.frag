@@ -17,32 +17,38 @@ layout(location = 10) uniform vec2 uRimParams;
 
 // Shapes & Blur
 #define MAX_SHAPES 16
-layout(location = 11) uniform float uShapeData[MAX_SHAPES * 6];
-layout(location = 107) uniform vec4 uBlurHeader;
-layout(location = 108) uniform vec4 u_samples[50];
+// Shape Data stride increased from 6 to 7 floats
+layout(location = 11) uniform float uShapeData[MAX_SHAPES * 7];
+
+// Previous Location: 107 -> New Location: 123 (+16 offset)
+layout(location = 123) uniform vec4 uBlurHeader;
+layout(location = 124) uniform vec4 u_samples[50];
 
 // Touch & Glow
 #define MAX_TOUCHES 8
-layout(location = 308) uniform float uTouchCount_f;
-layout(location = 309) uniform vec4 uTouches[MAX_TOUCHES];
-layout(location = 317) uniform float uTouchOwners[MAX_TOUCHES];
+// Previous Location: 308 -> New Location: 324
+layout(location = 324) uniform float uTouchCount_f;
+layout(location = 325) uniform vec4 uTouches[MAX_TOUCHES];
+layout(location = 333) uniform float uTouchOwners[MAX_TOUCHES];
 
-layout(location = 325) uniform vec4 uGlowParams;
-layout(location = 326) uniform vec4 uGlowColor;
-layout(location = 327) uniform vec4 uGlowOverrides;
-layout(location = 328) uniform vec4 uGlowFlags;
-layout(location = 329) uniform vec4 uGlowGlass;
-layout(location = 330) uniform float uGlobalBlurSigma;
-layout(location = 331) uniform float uTouchGlowStrengths[MAX_TOUCHES];
+layout(location = 341) uniform vec4 uGlowParams;
+layout(location = 342) uniform vec4 uGlowColor;
+layout(location = 343) uniform vec4 uGlowOverrides;
+layout(location = 344) uniform vec4 uGlowFlags;
+layout(location = 345) uniform vec4 uGlowGlass;
+layout(location = 346) uniform float uGlobalBlurSigma;
+layout(location = 347) uniform float uTouchGlowStrengths[MAX_TOUCHES];
 
-layout(location = 339) uniform float uBgScale;
-layout(location = 340) uniform vec2 uNormalParams;
+// Previous Location: 339 -> New Location: 355
+layout(location = 355) uniform vec2 uBgScale;
+// Previous Location: 341 -> New Location: 357
+layout(location = 357) uniform vec2 uNormalParams;
 
 // ───────────────────── Projection Uniform ─────────────────────
-// xy = Offset (0..1), zw = Scale (⚠ wird in Dart so gesetzt,
-//     dass screenUV in PIXELN hereinkommt)
-layout(location = 409) uniform vec4 uChildProjection;
-layout(location = 413) uniform vec2 uChildSize;
+// Previous Location: 409 -> New Location: 425
+layout(location = 425) uniform vec4 uChildProjection;
+// Previous Location: 413 -> New Location: 429
+layout(location = 429) uniform vec2 uChildSize;
 
 // ───────────────────── Textures ─────────────────────
 uniform sampler2D uBackgroundTexture;
@@ -90,11 +96,6 @@ void main() {
   // Lokale Fragment-Koordinate im ClipRect (in Device-Pixeln)
   vec2 pScreen = FlutterFragCoord().xy;
 
-  // WICHTIG:
-  // In deinem bisherigen Setup ist uSize anscheinend entweder 0 oder identisch
-  // mit der Clip-Größe, so dass:
-  //   invSize = 1.0
-  // → screenUV == pScreen (Pixel-Koordinaten)
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
   vec2 screenUV = pScreen * invSize;
 
@@ -127,10 +128,11 @@ void main() {
     return;
   }
 
-  // Scale Logic für Background
-  float s = max(uBgScale, 1e-4);
-  float cx = uShapeData[idx * 6 + 1];
-  float cy = uShapeData[idx * 6 + 2];
+  // Scale Logic für Background (separat X/Y)
+  vec2 s = max(uBgScale, vec2(1e-4));
+  // Updated index stride to 7
+  float cx = uShapeData[idx * 7 + 1];
+  float cy = uShapeData[idx * 7 + 2];
   vec2 centerScreenPx = sdfToScreenPx(vec2(cx, cy));
   vec2 centerUV = centerScreenPx * invSize;
 #ifdef IMPELLER_TARGET_OPENGLES
@@ -140,13 +142,7 @@ void main() {
   vec2 scaledUV = centerUV + (screenUV - centerUV) / s;
 
   // ──────────────── Child UV Projection ────────────────
-  // screenUV ist hier (effektiv) in PIXELN.
-  // uChildProjection wird in Dart so gesetzt, dass:
-  //   childUVRaw = (bounds.left / layerW, bounds.top / layerH)
-  //              + screenUV * (1 / layerW, 1 / layerH)
-  // → also globale Layer-UVs (0..1) für das backgroundChild.
-vec2 childUVRaw =  uChildProjection.xy + childUV;// * uChildProjection.zw;
-
+  vec2 childUVRaw = uChildProjection.xy + childUV; 
 
   vec2 grad2 = _unionGrad2_df(sdUnion);
   vec3 normal = _buildNormal3_fromUnion(sdUnion, grad2);

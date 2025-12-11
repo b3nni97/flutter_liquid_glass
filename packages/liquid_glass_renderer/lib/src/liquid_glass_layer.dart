@@ -271,31 +271,49 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _idxRimParams = 34;
 
   static const int _shapeDataBaseFloat = 36; // first float of uShapeData
-  static const int _blurBaseFloat = 132; // uBlurHeader.x (u_dir_x)
-  static const int _blurSamplesFloat = 136; // u_samples[0].x
+
+  // UPDATED: Shift indices by +16 (16 shapes * 1 extra float = 16)
+  // Old: 132 -> New: 148
+  static const int _blurBaseFloat = 148; // uBlurHeader.x (u_dir_x)
+  // Old: 136 -> New: 152
+  static const int _blurSamplesFloat = 152; // u_samples[0].x
 
   // Touch/Glow indices (match liquid_glass.frag layout ordering)
-  static const int _idxTouchCount = 336;
-  static const int _idxTouches = 337; // 8 * vec4 → 32 floats
-  static const int _idxTouchOwners = 369;
-  static const int _idxGlowParams = 377; // vec4
-  static const int _idxGlowColor = 381; // vec4
-  static const int _idxGlowOverrides = 385; // vec4
-  static const int _idxGlowFlags = 389; // vec4
-  static const int _idxGlowGlass = 393; // vec4
-  static const int _idxGlobalBlurSigma = 397; // float
-  static const int _idxTouchGlowStrengths = 398; // floats[8]
+  // Old: 336 -> New: 352
+  static const int _idxTouchCount = 352;
+  // Old: 337 -> New: 353
+  static const int _idxTouches = 353; // 8 * vec4 → 32 floats
+  // Old: 369 -> New: 385
+  static const int _idxTouchOwners = 385;
+  // Old: 377 -> New: 393
+  static const int _idxGlowParams = 393; // vec4
+  // Old: 381 -> New: 397
+  static const int _idxGlowColor = 397; // vec4
+  // Old: 385 -> New: 401
+  static const int _idxGlowOverrides = 401; // vec4
+  // Old: 389 -> New: 405
+  static const int _idxGlowFlags = 405; // vec4
+  // Old: 393 -> New: 409
+  static const int _idxGlowGlass = 409; // vec4
+  // Old: 397 -> New: 413
+  static const int _idxGlobalBlurSigma = 413; // float
+  // Old: 398 -> New: 414
+  static const int _idxTouchGlowStrengths = 414; // floats[8]
 
-  // Hintergrund-Skalierung (nur im Main-Pass genutzt)
-  static const int _idxBgScale = 406; // float
+  // Hintergrund-Skalierung (nur im Main-Pass genutzt, vec2)
+  // Old: 406 -> New: 422
+  static const int _idxBgScale = 422; // vec2 base
 
   // Parameter für Normalen/Abschrägung (vec2)
-  static const int _idxNormalParams = 407; // float
+  // Old: 408 -> New: 424
+  static const int _idxNormalParams = 424; // vec2 base
 
   // Projection Uniform (vec4: offX, offY, scaleX, scaleY)
-  static const int _idxChildProjection = 409;
+  // Old: 410 -> New: 426
+  static const int _idxChildProjection = 426;
   // NEU: Child Size Uniform (vec2: width, height)
-  static const int _idxChildSize = 413;
+  // Old: 414 -> New: 430
+  static const int _idxChildSize = 430;
 
   static const double _eps = 0.01;
 
@@ -577,6 +595,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
         _lastShapes = shapeList;
         return true;
       }
+
+      // CHECK: cornerSmoothing changes
+      if ((a.cornerSmoothing ?? -1.0) != (b.cornerSmoothing ?? -1.0)) {
+        _lastShapes = shapeList;
+        return true;
+      }
     }
     return false;
   }
@@ -652,6 +676,11 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     return clampedGlobal.shift(-layerOffset);
   }
 
+  double snapToPhys(double logicalValue) {
+    return (logicalValue * _devicePixelRatio).floorToDouble() /
+        _devicePixelRatio;
+  }
+
   /// Snap a rectangle to device pixels to avoid half-pixel sampling seams.
   Rect _snapRectToDeviceFull(Rect r) {
     final d = _devicePixelRatio;
@@ -725,39 +754,48 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     // 1. Safety Checks (Layout dimensions & Glass Scale)
     final double layerW = size.width > 0 ? size.width : 1.0;
     final double layerH = size.height > 0 ? size.height : 1.0;
-    // 2. Scale Calculation (Kein Zoom, nur Bounds-Relation)
-    final double projScaleX = bounds.width / layerW;
-    final double projScaleY = bounds.height / layerH;
 
-    // 3. Offset Calculation (Automatisches Zentrieren der Textur)
+    // --- 3. Offset Calculation (Zentriert, High-Precision) ---
     final double texPhysW = _imageHolder.size.width;
     final double texPhysH = _imageHolder.size.height;
     double calculatedOffX = 0.0;
     double calculatedOffY = 0.0;
 
     if (texPhysW > 0 && texPhysH > 0) {
-      // Umrechnen in logische Pixel
-      final double texLogW = texPhysW / _devicePixelRatio;
-      final double texLogH = texPhysH / _devicePixelRatio;
+      // 1. Wir rechnen ALLES in physischen Device-Pixeln für maximale Präzision.
+      //    (Keine Division durch DPR am Anfang, um Nachkommastellen zu erhalten)
 
-      // Mittelpunkte berechnen
-      final double layerCenterX = size.width / 2.0;
-      final double layerCenterY = size.height / 2.0;
-      final double texCenterX = texLogW / 2.0;
-      final double texCenterY = texLogH / 2.0;
+      final double layerPhysW = size.width * dpr;
+      final double layerPhysH = size.height * dpr;
 
-      // Layer-Ursprung (0,0) in der Textur finden
+      // 2. Deine Original-Logik: Zentren bestimmen
+      final double texCenterX = texPhysW / 2.0;
+      final double texCenterY = texPhysH / 2.0;
+
+      final double layerCenterX = layerPhysW / 2.0;
+      final double layerCenterY = layerPhysH / 2.0;
+
+      // 3. Den Ursprung berechnen (Wo fängt der Layer im Bild an?)
+      //    Hier passiert das "Centering".
       final double layerOriginInTexX = texCenterX - layerCenterX;
       final double layerOriginInTexY = texCenterY - layerCenterY;
 
-      // Startpunkt der Render-Bounds in der Textur
-      final double startPixelX = layerOriginInTexX + bounds.left;
-      final double startPixelY = layerOriginInTexY + bounds.top;
+      // 4. Startpunkt der Bounds addieren
+      //    WICHTIG: bounds.left ist logisch, daher * dpr rechnen.
+      //    WICHTIG: KEIN round(), floor() oder snap() hier! Das verursacht das Zittern.
+      final double startPixelX = layerOriginInTexX + (bounds.left * dpr);
+      final double startPixelY = layerOriginInTexY + (bounds.top * dpr);
 
-      // Normalisieren zu UV
-      calculatedOffX = startPixelX / texLogW;
-      calculatedOffY = startPixelY / texLogH;
+      // 5. Normalisieren zu UV (0.0 bis 1.0)
+      calculatedOffX = startPixelX / texPhysW;
+      calculatedOffY = startPixelY / texPhysH;
     }
+
+    // Auch bei der Scale NICHT runden, wenn du animierst.
+    final double projScaleX =
+        bounds.width / (size.width > 0 ? size.width : 1.0);
+    final double projScaleY =
+        bounds.height / (size.height > 0 ? size.height : 1.0);
 
     _shader
       ..setFloat(_idxChildProjection + 0, calculatedOffX)
@@ -792,8 +830,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
         ..setFloat(_idxLightDir + 1, math.sin(_settings.lightAngle))
         ..setFloat(_idxRimParams + 0, _settings.rimWidthPx)
         ..setFloat(_idxRimParams + 1, _settings.rimSharpness)
-        // Skalierung des Hintergrunds im Shape
-        ..setFloat(_idxBgScale, _settings.backgroundScale)
+        // Skalierung des Hintergrunds im Shape (Offset → vec2)
+        ..setFloat(_idxBgScale + 0, _settings.backgroundScale.dx)
+        ..setFloat(_idxBgScale + 1, _settings.backgroundScale.dy)
         // Normalen-Parameter
         ..setFloat(_idxNormalParams + 0, _settings.normalPlateauWidth)
         ..setFloat(_idxNormalParams + 1, _settings.normalSoftness);
@@ -805,14 +844,17 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
       for (var i = 0; i < shapeCount; i++) {
         final shape = i < shapes.length ? shapes[i].$2 : RawShape.none;
-        final base = _shapeDataBaseFloat + (i * 6);
+        // UPDATED: stride is now 7 floats (0..6)
+        final base = _shapeDataBaseFloat + (i * 7);
         _shader
           ..setFloat(base + 0, shape.type.index.toDouble())
           ..setFloat(base + 1, shape.center.dx * _devicePixelRatio)
           ..setFloat(base + 2, shape.center.dy * _devicePixelRatio)
           ..setFloat(base + 3, shape.size.width * _devicePixelRatio)
           ..setFloat(base + 4, shape.size.height * _devicePixelRatio)
-          ..setFloat(base + 5, shape.cornerRadius * _devicePixelRatio);
+          ..setFloat(base + 5, shape.cornerRadius * _devicePixelRatio)
+          // NEW: Upload cornerSmoothing (-1.0 if null)
+          ..setFloat(base + 6, shape.cornerSmoothing ?? -1.0);
       }
 
       // Spiegel die relevanten Uniforms in den H-Pass
@@ -830,14 +872,17 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
       for (var i = 0; i < shapeCount; i++) {
         final shape = i < shapes.length ? shapes[i].$2 : RawShape.none;
-        final base = _shapeDataBaseFloat + (i * 6);
+        // UPDATED: stride is now 7 floats
+        final base = _shapeDataBaseFloat + (i * 7);
         _blurH
           ..setFloat(base + 0, shape.type.index.toDouble())
           ..setFloat(base + 1, shape.center.dx * _devicePixelRatio)
           ..setFloat(base + 2, shape.center.dy * _devicePixelRatio)
           ..setFloat(base + 3, shape.size.width * _devicePixelRatio)
           ..setFloat(base + 4, shape.size.height * _devicePixelRatio)
-          ..setFloat(base + 5, shape.cornerRadius * _devicePixelRatio);
+          ..setFloat(base + 5, shape.cornerRadius * _devicePixelRatio)
+          // NEW: Upload cornerSmoothing
+          ..setFloat(base + 6, shape.cornerSmoothing ?? -1.0);
       }
 
       _lastShapeCount = shapeCount;

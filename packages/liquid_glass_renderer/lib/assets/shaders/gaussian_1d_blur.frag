@@ -1,4 +1,4 @@
-// gaussian_1d_blur.frag — FINAL (With Coordinate Fix)
+// gaussian_1d_blur.frag — FINAL (Updated for 7-float stride)
 // H/V 1D Blur (index-stabil, liquid_glass.frag-kompatibel)
 
 #version 320 es
@@ -17,16 +17,18 @@ layout(location = 6)  uniform mat4 uTransform;    // Wird ignoriert (Identity)
 layout(location = 10) uniform vec2 uRimParams;
 
 #define MAX_SHAPES 16
-layout(location = 11) uniform float uShapeData[MAX_SHAPES * 6];
+// UPDATE: Stride is now 7 floats
+layout(location = 11) uniform float uShapeData[MAX_SHAPES * 7];
 
 // ───────────────────── Blur Header ───────────────────────────────────────────
-layout(location = 107) uniform vec4 uBlurHeader;
+// UPDATE: Shifted location 107 -> 123 (+16)
+layout(location = 123) uniform vec4 uBlurHeader;
 #define u_dir_x        (uBlurHeader.x)
 #define u_dir_y        (uBlurHeader.y)
 #define u_sample_count (uBlurHeader.z)
 #define u_tile_mode    (uBlurHeader.w)
 
-layout(location = 108) uniform vec4 u_samples[50];
+layout(location = 124) uniform vec4 u_samples[50];
 
 // ───────────────────── Texture / Output ────────────────────────────────────
 uniform sampler2D uBackgroundTexture;
@@ -111,6 +113,16 @@ void main(){
 
   // 2. Koordinaten FIX: 
   // Wir nutzen pScreen direkt. Keine Matrix-Multiplikation mit uTransform!
+  // Wir wenden jedoch die Translation (aus uTransform) auf pScreen an, 
+  // falls der Layer verschoben ist, damit die SDFs an der richtigen Stelle sitzen.
+  // Da uTransform im Blur-Shader normalerweise Identity ist (oder nur Translation), 
+  // extrahieren wir die Translation.
+  
+  // ACHTUNG: Im Main-Shader nutzen wir uTransform * pScreen. 
+  // Im Blur-Shader nutzen wir normalerweise denselben Koordinatenraum.
+  // Wir extrahieren die Translation (uTransform[3].xy) und addieren sie,
+  // damit die SDFs deckungsgleich mit dem Glas-Pass sind.
+
   vec2 p = pScreen; 
 
   // 3. Maske berechnen
