@@ -6,7 +6,6 @@ import 'package:liquid_glass_renderer/src/shaders.dart';
 
 Future<void> testExecutable(FutureOr<void> Function() testMain) async {
   await ShaderBuilder.precacheShader(liquidGlassShader);
-  await ShaderBuilder.precacheShader(arbitraryShader);
 
   return AlchemistConfig.runWithConfig(
     config: AlchemistConfig(
