@@ -1,7 +1,8 @@
-// ignore_for_file: avoid_setters_without_getters
+// liquid_glass.dart
 
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:liquid_glass_renderer/src/glass_link.dart';
@@ -10,14 +11,19 @@ import 'package:liquid_glass_renderer/src/liquid_glass_settings.dart';
 import 'package:liquid_glass_renderer/src/liquid_shape.dart';
 import 'package:meta/meta.dart';
 
-/// A liquid glass shape.
+/// A widget that applies a liquid glass effect to its child.
 ///
-/// Kann alleine genutzt werden (eigener Layer) oder als Teil eines
-/// gemeinsamen [LiquidGlassLayer] (`LiquidGlass.inLayer`).
+/// This widget can be used in two modes:
+/// 1. **Standalone:** It creates its own rendering layer. This is useful for
+///    isolated effects.
+/// 2. **In-Layer:** It participates in an ancestor [LiquidGlassLayer]. This allows
+///    multiple shapes to share the same refraction/reflection context and merge
+///    visually.
 class LiquidGlass extends StatelessWidget {
-  /// Standalone-Variante: erstellt einen eigenen [LiquidGlassLayer].
+  /// Creates a standalone liquid glass effect.
   ///
-  /// [touches] werden **lokal** für dieses eine Shape genutzt.
+  /// This creates an internal [LiquidGlassLayer]. The [touches] provided are
+  /// local to this specific shape.
   const LiquidGlass({
     required this.child,
     required this.shape,
@@ -25,14 +31,15 @@ class LiquidGlass extends StatelessWidget {
     this.clipBehavior = Clip.hardEdge,
     this.restrictThickness = true,
     this.touches = const <TouchPoint>[],
+    this.settings = const LiquidGlassSettings(),
     super.key,
-    LiquidGlassSettings settings = const LiquidGlassSettings(),
-  }) : _settings = settings;
+  }) : _isStandalone = true;
 
-  /// In-Layer-Variante: erwartet bereits einen übergeordneten [LiquidGlassLayer].
+  /// Creates a liquid glass shape that joins an existing [LiquidGlassLayer].
   ///
-  /// [touches] gelten **nur** für dieses Shape; der Layer vergibt intern
-  /// den passenden Owner-Index.
+  /// This widget must be a descendant of a [LiquidGlassLayer]. The [touches]
+  /// are local to this shape, but the visual settings are controlled by the
+  /// ancestor layer.
   const LiquidGlass.inLayer({
     required this.child,
     required this.shape,
@@ -40,79 +47,87 @@ class LiquidGlass extends StatelessWidget {
     this.glassContainsChild = true,
     this.clipBehavior = Clip.hardEdge,
     this.touches = const <TouchPoint>[],
-  })  : _settings = null,
+  })  : _isStandalone = false,
+        settings = null,
         restrictThickness = false;
 
-  /// The child of this widget.
+  /// The widget below this widget in the tree.
   final Widget child;
 
-  /// The shape of this glass.
+  /// The geometric shape of the glass.
   final LiquidShape shape;
 
-  /// Whether this glass should be rendered inside the glass or on top.
+  /// Whether the child content is rendered inside the glass (refracted) or
+  /// drawn on top of the glass.
   final bool glassContainsChild;
 
-  /// The clip behavior of this glass.
+  /// {@macro flutter.material.Material.clipBehavior}
   final Clip clipBehavior;
 
-  /// {@macro liquid_glass_renderer.restrict_thickness}
+  /// Whether to limit the thickness based on the shape's dimensions.
   final bool restrictThickness;
 
-  /// Touch-Hotspots, immer **per Shape**.
+  /// Touch interactions specific to this shape.
   final List<TouchPoint> touches;
 
-  final LiquidGlassSettings? _settings;
+  /// Configuration settings. Only used in standalone mode.
+  final LiquidGlassSettings? settings;
+
+  final bool _isStandalone;
 
   @override
   Widget build(BuildContext context) {
-    switch (_settings) {
-      case null:
-        // In-Layer: nur Rohform registrieren, Layer liefert Settings/Touch usw.
-        return _RawLiquidGlass(
-          shape: shape,
-          glassContainsChild: glassContainsChild,
-          localTouches: touches, // lokale Touches für dieses Shape
-          child: ClipPath(
-            clipper: ShapeBorderClipper(shape: shape),
-            clipBehavior: clipBehavior,
-            child: child,
-          ),
-        );
+    // 1. Prepare the content: A widget that creates the RenderObject.
+    // We wrap it in a builder to defer looking up the GlassScope until
+    // we are sure it exists in the context.
+    Widget buildShape(BuildContext context) {
+      return _LiquidGlassShapeWidget(
+        shape: shape,
+        glassContainsChild: glassContainsChild,
+        localTouches: touches,
+        link: GlassScope.of(context),
+        child: ClipPath(
+          clipper: ShapeBorderClipper(shape: shape),
+          clipBehavior: clipBehavior,
+          child: child,
+        ),
+      );
+    }
 
-      case final settings:
-        // Standalone: eigener Layer; Touches **nicht** am Layer,
-        // sondern als lokale Touches des einen Shapes.
-        return LiquidGlassLayer(
-          settings: settings,
-          restrictThickness: restrictThickness,
-          child: _RawLiquidGlass(
-            shape: shape,
-            glassContainsChild: glassContainsChild,
-            localTouches: touches,
-            child: ClipPath(
-              clipper: ShapeBorderClipper(shape: shape),
-              clipBehavior: clipBehavior,
-              child: child,
-            ),
-          ),
-        );
+    if (_isStandalone) {
+      // Standalone Mode: We must create the layer that provides the GlassScope.
+      return LiquidGlassLayer(
+        settings: settings!,
+        restrictThickness: restrictThickness,
+        // We use a Builder here because LiquidGlassLayer inserts the GlassScope.
+        // The child context needs to be *under* that Scope to find it.
+        child: Builder(builder: buildShape),
+      );
+    } else {
+      // In-Layer Mode: We assume GlassScope exists in the ancestry.
+      return buildShape(context);
     }
   }
 }
 
-class _RawLiquidGlass extends SingleChildRenderObjectWidget {
-  const _RawLiquidGlass({
+// -----------------------------------------------------------------------------
+// Internal Implementation
+// -----------------------------------------------------------------------------
+
+/// The glue between the Widget tree and the RenderObject tree.
+class _LiquidGlassShapeWidget extends SingleChildRenderObjectWidget {
+  const _LiquidGlassShapeWidget({
     required super.child,
     required this.shape,
     required this.glassContainsChild,
     required this.localTouches,
+    required this.link,
   });
 
   final LiquidShape shape;
   final bool glassContainsChild;
-
-  /// Touches, die **nur** zu diesem Shape gehören.
   final List<TouchPoint> localTouches;
+  final GlassLink link;
 
   @override
   RenderObject createRenderObject(BuildContext context) {
@@ -120,6 +135,7 @@ class _RawLiquidGlass extends SingleChildRenderObjectWidget {
       shape: shape,
       glassContainsChild: glassContainsChild,
       localTouches: localTouches,
+      link: link,
     );
   }
 
@@ -131,83 +147,87 @@ class _RawLiquidGlass extends SingleChildRenderObjectWidget {
     renderObject
       ..shape = shape
       ..glassContainsChild = glassContainsChild
-      ..localTouches = localTouches;
+      ..localTouches = localTouches
+      ..link = link;
   }
 }
 
+/// A RenderProxyBox that registers itself with a [GlassLink].
+///
+/// This RenderObject does not paint itself directly in the standard [paint] pass.
+/// Instead, it registers its geometry and configuration with the [GlassLink],
+/// which is read by the [RenderLiquidGlassLayer]. The layer then calls
+/// [paintFromLayer] at the appropriate time in the shader pipeline.
 @internal
 class RenderLiquidGlass extends RenderProxyBox {
   RenderLiquidGlass({
     required LiquidShape shape,
     required bool glassContainsChild,
+    required GlassLink link,
     List<TouchPoint> localTouches = const <TouchPoint>[],
   })  : _shape = shape,
         _glassContainsChild = glassContainsChild,
-        _localTouches = List<TouchPoint>.from(localTouches);
+        _localTouches = List<TouchPoint>.from(localTouches),
+        _link = link {
+    // Register immediately upon creation.
+    _register();
+  }
 
-  late LiquidShape _shape;
+  // --- Properties ---
+
+  LiquidShape _shape;
   LiquidShape get shape => _shape;
   set shape(LiquidShape value) {
     if (_shape == value) return;
     _shape = value;
+    _updateRegistration();
     markNeedsPaint();
-    _updateGlassLink();
   }
 
-  bool _glassContainsChild = true;
+  bool _glassContainsChild;
   bool get glassContainsChild => _glassContainsChild;
   set glassContainsChild(bool value) {
     if (_glassContainsChild == value) return;
     _glassContainsChild = value;
+    _updateRegistration();
     markNeedsPaint();
-    _updateGlassLink();
   }
 
   List<TouchPoint> _localTouches;
   List<TouchPoint> get localTouches => _localTouches;
-  set localTouches(List<TouchPoint> v) {
-    _localTouches = List<TouchPoint>.from(v);
+  set localTouches(List<TouchPoint> value) {
+    // Deep comparison could be expensive, assuming immutable list replacement.
+    if (listEquals(_localTouches, value)) return;
+    _localTouches = List<TouchPoint>.from(value);
+    _link.notifyShapeLayoutChanged(this);
     markNeedsPaint();
-    _glassLink?.notifyShapeLayoutChanged(this);
   }
 
-  GlassLink? _glassLink;
-
-  @override
-  void attach(PipelineOwner owner) {
-    super.attach(owner);
-    _registerWithParentLayer();
+  GlassLink _link;
+  set link(GlassLink value) {
+    if (identical(_link, value)) return;
+    _unregister();
+    _link = value;
+    _register();
+    markNeedsPaint();
   }
 
-  @override
-  void detach() {
-    _unregisterFromParentLayer();
-    super.detach();
+  // --- Registration Logic ---
+
+  void _register() {
+    _link.registerShape(
+      this,
+      _shape,
+      glassContainsChild: _glassContainsChild,
+    );
   }
 
-  void _registerWithParentLayer() {
-    var ancestor = parent;
-    while (ancestor != null) {
-      if (ancestor is RenderLiquidGlassLayer) {
-        _glassLink = ancestor.glassLink;
-        _glassLink?.registerShape(
-          this,
-          _shape,
-          glassContainsChild: _glassContainsChild,
-        );
-        break;
-      }
-      ancestor = ancestor.parent;
-    }
+  void _unregister() {
+    _link.unregisterShape(this);
   }
 
-  void _unregisterFromParentLayer() {
-    _glassLink?.unregisterShape(this);
-    _glassLink = null;
-  }
-
-  void _updateGlassLink() {
-    _glassLink?.updateShape(
+  void _updateRegistration() {
+    _link.updateShape(
       this,
       _shape,
       glassContainsChild: _glassContainsChild,
@@ -215,35 +235,33 @@ class RenderLiquidGlass extends RenderProxyBox {
   }
 
   @override
+  void dispose() {
+    _unregister();
+    super.dispose();
+  }
+
+  // --- Layout & Painting ---
+
+  @override
   void performLayout() {
     super.performLayout();
-    _glassLink?.notifyShapeLayoutChanged(this);
+    // Notify the layer that our geometry has changed.
+    _link.notifyShapeLayoutChanged(this);
   }
 
   @override
-  void paint(PaintingContext context, Offset offset) {}
-
-  void paintFromLayer(PaintingContext context, Offset offset) {
-    super.paint(context, offset);
+  void paint(PaintingContext context, Offset offset) {
+    // No-op.
+    // We do NOT paint in the standard pass. We are painted by the
+    // LiquidGlassLayer via `paintFromLayer`.
   }
 
-  void paintBlur(PaintingContext context, Offset offset, double blur) {
-    if (blur <= 0) return;
-
-    context.pushClipPath(
-      true,
-      offset,
-      offset & size,
-      ShapeBorderClipper(shape: shape).getClip(size),
-      (context, offset) {
-        context.pushLayer(
-          BackdropFilterLayer(
-            filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-          ),
-          (context, offset) {},
-          offset,
-        );
-      },
-    );
+  /// Called by the [RenderLiquidGlassLayer] to paint the child content.
+  ///
+  /// This occurs either before the glass effect (if [glassContainsChild] is true)
+  /// or after the glass effect (if false).
+  void paintFromLayer(PaintingContext context, Offset offset) {
+    // Standard RenderProxyBox painting of the child.
+    super.paint(context, offset);
   }
 }

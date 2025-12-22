@@ -5,28 +5,34 @@ precision mediump int;
 
 #include <flutter/runtime_effect.glsl>
 
-// ───────────────────── Header ─────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Uniform Layouts
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Global Configuration
 layout(location = 0) uniform vec2 uSize;
 layout(location = 1) uniform vec4 uGlassColor;
-layout(location = 2) uniform vec4 uOpticalProps;
-layout(location = 3) uniform vec4 uLightConfig;
-layout(location = 4) uniform vec2 uColorAdjust;
+layout(location = 2) uniform vec4 uOpticalProps;  // x:refract, y:chroma, z:thick, w:blend
+layout(location = 3) uniform vec4 uLightConfig;   // x:angle, y:intense, z:ambient, w:sat
+layout(location = 4) uniform vec2 uColorAdjust;   // x:lightness, y:numShapes
 layout(location = 5) uniform vec2 uLightDirection;
 layout(location = 6) uniform mat4 uTransform;
 layout(location = 10) uniform vec2 uRimParams;
 
-// Shapes & Blur
+// Shape Data
+// 16 Shapes * 7 Floats per shape = 112 floats
+// Base index: 36 (matches Dart _uShapeData)
 #define MAX_SHAPES 16
-// Shape Data stride increased from 6 to 7 floats
 layout(location = 11) uniform float uShapeData[MAX_SHAPES * 7];
 
-// Previous Location: 107 -> New Location: 123 (+16 offset)
-layout(location = 123) uniform vec4 uBlurHeader;
+// Blur Configuration
+// Base index: 148 (matches Dart _uBlurHeader)
+layout(location = 123) uniform vec4 uBlurHeader; // x:dirX, y:dirY, z:count, w:unused
 layout(location = 124) uniform vec4 u_samples[50];
 
 // Touch & Glow
+// Base index: 352 (matches Dart _uTouchCount)
 #define MAX_TOUCHES 8
-// Previous Location: 308 -> New Location: 324
 layout(location = 324) uniform float uTouchCount_f;
 layout(location = 325) uniform vec4 uTouches[MAX_TOUCHES];
 layout(location = 333) uniform float uTouchOwners[MAX_TOUCHES];
@@ -39,38 +45,46 @@ layout(location = 345) uniform vec4 uGlowGlass;
 layout(location = 346) uniform float uGlobalBlurSigma;
 layout(location = 347) uniform float uTouchGlowStrengths[MAX_TOUCHES];
 
-// Previous Location: 339 -> New Location: 355
+// Projection & Environment
+// Base index: 422
 layout(location = 355) uniform vec2 uBgScale;
-// Previous Location: 341 -> New Location: 357
 layout(location = 357) uniform vec2 uNormalParams;
-
-// ───────────────────── Projection Uniform ─────────────────────
-// Previous Location: 409 -> New Location: 425
-layout(location = 425) uniform vec4 uChildProjection;
-// Previous Location: 413 -> New Location: 429
+layout(location = 425) uniform vec4 uChildProjection; // x:offX, y:offY, z:scaleX, w:scaleY
 layout(location = 429) uniform vec2 uChildSize;
 
-// ───────────────────── Textures ─────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Textures
+// ─────────────────────────────────────────────────────────────────────────────
+
 uniform sampler2D uBackgroundTexture;
 uniform sampler2D uBackgroundChildTexture;
 
 layout(location = 0) out vec4 fragColor;
 
-// ───────────────────── Aliases & Includes ─────────────────────
-float uRefractiveIndex        = uOpticalProps.x;
-float uChromaticAberration    = uOpticalProps.y;
-float uThickness              = uOpticalProps.z;
-float uBlend                  = uOpticalProps.w;
-float uLightIntensity         = uLightConfig.y;
-float uAmbientStrength        = uLightConfig.z;
-float uSaturation             = uLightConfig.w;
-float uLightness              = uColorAdjust.x;
-float uNumShapes              = uColorAdjust.y;
-float rimWidthPx              = uRimParams.x;
-float rimSharpness            = uRimParams.y;
-float uNormalPlateauWidth     = uNormalParams.x;
-float uNormalSoftness         = uNormalParams.y;
+// ─────────────────────────────────────────────────────────────────────────────
+// Utilities & Includes
+// ─────────────────────────────────────────────────────────────────────────────
 
+// Unpack optical properties for readability
+float uRefractiveIndex     = uOpticalProps.x;
+float uChromaticAberration = uOpticalProps.y;
+float uThickness           = uOpticalProps.z;
+float uBlend               = uOpticalProps.w;
+
+// Unpack lighting
+float uLightIntensity      = uLightConfig.y;
+float uAmbientStrength     = uLightConfig.z;
+float uSaturation          = uLightConfig.w;
+float uLightness           = uColorAdjust.x;
+float uNumShapes           = uColorAdjust.y; 
+
+// Unpack Geometry
+float rimWidthPx           = uRimParams.x;
+float rimSharpness         = uRimParams.y;
+float uNormalPlateauWidth  = uNormalParams.x;
+float uNormalSoftness      = uNormalParams.y;
+
+// Include your custom SDF libraries
 #include "shared.glsl"
 #include "lg_union_sdf.glsl"
 
@@ -78,96 +92,116 @@ float uNormalSoftness         = uNormalParams.y;
 #define AGSL_AA_WIDTH_PX 1.0
 #endif
 
-vec2 _unionGrad2_df(float sdUnion) {
-  return vec2(dFdx(sdUnion), dFdy(sdUnion));
+/// Calculates the 2D gradient of the distance field using screen-space derivatives.
+/// This tells us in which direction the distance increases most (the "slope").
+vec2 calculateSDFGradient(float dist) {
+    return vec2(dFdx(dist), dFdy(dist));
 }
 
-vec3 _buildNormal3_fromUnion(float sdUnion, vec2 grad2) {
-  float plateauWidth = uNormalPlateauWidth;
-  float softness = uNormalSoftness;
-  float fullRange = uThickness + plateauWidth;
-  float t = max(fullRange + sdUnion, 0.0) / max(fullRange, 1e-6);
-  float n_cos = pow(t, softness);
-  float n_sin = sqrt(max(0.0, 1.0 - n_cos * n_cos));
-  return normalize(vec3(grad2 * n_cos, n_sin));
+/// Calculates a pseudo-3D surface normal based on the distance field.
+/// It creates a rounded profile ("plateau") for the glass surface.
+///
+/// @param dist   The signed distance to the shape edge.
+/// @param grad   The 2D gradient of the distance field.
+vec3 calculateSurfaceNormal(float dist, vec2 grad) {
+    float fullRange = uThickness + uNormalPlateauWidth;
+    // Normalize distance: 0.0 = deep inside, 1.0 = at the edge/plateau start
+    float t = max(fullRange + dist, 0.0) / max(fullRange, 1e-6);
+    
+    // Shape the curve
+    float n_cos = pow(t, uNormalSoftness);
+    float n_sin = sqrt(max(0.0, 1.0 - n_cos * n_cos));
+    
+    return normalize(vec3(grad * n_cos, n_sin));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Shader
+// ─────────────────────────────────────────────────────────────────────────────
 
 void main() {
-  // Lokale Fragment-Koordinate im ClipRect (in Device-Pixeln)
-  vec2 pScreen = FlutterFragCoord().xy;
+    // 1. Coordinate Setup
+    vec2 pScreen = FlutterFragCoord().xy;
+    vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
+    vec2 screenUV = pScreen * invSize;
 
-  vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
-  vec2 screenUV = pScreen * invSize;
+    // Child projection coordinates
+    vec2 invChildSize = vec2(1.0) / max(uChildSize, vec2(1.0));
+    vec2 childUV = pScreen * invChildSize;
 
-  vec2 invChildSize = vec2(1.0) / max(uChildSize, vec2(1.0));
-  vec2 childUV = pScreen * invChildSize;
+    // Flip Y for OpenGLES backends (Android compatibility)
+    #ifdef IMPELLER_TARGET_OPENGLES
+    screenUV.y = 1.0 - screenUV.y;
+    childUV.y = 1.0 - childUV.y;
+    #endif
 
-#ifdef IMPELLER_TARGET_OPENGLES
-  screenUV.y = 1.0 - screenUV.y;
-  childUV.y = 1.0 - childUV.y;
-#endif
+    // Transform screen coordinates to local layer space
+    vec4 transformedCoord = uTransform * vec4(pScreen, 0.0, 1.0);
+    vec2 p = transformedCoord.xy;
 
-  // p: globale Device-Pixel-Koordinate relativ zum Layer-Ursprung
-  vec4 transformedCoord = uTransform * vec4(pScreen, 0.0, 1.0);
-  vec2 p = transformedCoord.xy;
+    // 2. SDF Calculation
+    int idx;
+    float sdUnion = sceneSDF_withIndex_fast(p, idx);
 
-  // Signed Distance Field im globalen SDF-Space (Device-Pixel)
-  int idx;
-  float sdUnion = sceneSDF_withIndex_fast(p, idx);
+    // Compute alpha mask based on distance
+    float foregroundAlpha = smoothstep(
+        0.0,
+        AGSL_AA_WIDTH_PX,
+        clamp(-sdUnion, 0.0, AGSL_AA_WIDTH_PX)
+    );
 
-  float foregroundAlpha = smoothstep(
-    0.0,
-    AGSL_AA_WIDTH_PX,
-    clamp(-sdUnion, 0.0, AGSL_AA_WIDTH_PX)
-  );
+    // 3. Early Exit (Background Pass)
+    if (foregroundAlpha < 0.01) {
+        fragColor = texScreen(uBackgroundTexture, screenUV);
+        return;
+    }
 
-  // Hintergrund-Sampling
-  vec4 src = texScreen(uBackgroundTexture, screenUV);
-  if (foregroundAlpha < 0.01) {
-    fragColor = src;
-    return;
-  }
+    // 4. Background Scaling Logic
+    // Compute the center of the active shape to zoom the background relative to it
+    vec2 s = max(uBgScale, vec2(1e-4));
+    // Index stride is 7 (matches Dart uShapeData packing)
+    float cx = uShapeData[idx * 7 + 1]; // Center X
+    float cy = uShapeData[idx * 7 + 2]; // Center Y
+    
+    vec2 centerScreenPx = sdfToScreenPx(vec2(cx, cy));
+    vec2 centerUV = centerScreenPx * invSize;
+    
+    #ifdef IMPELLER_TARGET_OPENGLES
+    centerUV.y = 1.0 - centerUV.y;
+    #endif
 
-  // Scale Logic für Background (separat X/Y)
-  vec2 s = max(uBgScale, vec2(1e-4));
-  // Updated index stride to 7
-  float cx = uShapeData[idx * 7 + 1];
-  float cy = uShapeData[idx * 7 + 2];
-  vec2 centerScreenPx = sdfToScreenPx(vec2(cx, cy));
-  vec2 centerUV = centerScreenPx * invSize;
-#ifdef IMPELLER_TARGET_OPENGLES
-  centerUV.y = 1.0 - centerUV.y;
-#endif
+    vec2 scaledUV = centerUV + (screenUV - centerUV) / s;
 
-  vec2 scaledUV = centerUV + (screenUV - centerUV) / s;
+    // 5. Reflection/Refraction Setup
+    vec2 childUVRaw = uChildProjection.xy + childUV;
+    
+    // Calculate Normal Map
+    vec2 gradient = calculateSDFGradient(sdUnion);
+    vec3 normal = calculateSurfaceNormal(sdUnion, gradient);
 
-  // ──────────────── Child UV Projection ────────────────
-  vec2 childUVRaw = uChildProjection.xy + childUV; 
-
-  vec2 grad2 = _unionGrad2_df(sdUnion);
-  vec3 normal = _buildNormal3_fromUnion(sdUnion, grad2);
-
-  fragColor = renderLiquidGlass(
-    scaledUV,       // UV für Background (gezoomt)
-    childUVRaw,     // UV für backgroundChild
-    p,
-    uSize,
-    sdUnion,
-    uThickness,
-    uRefractiveIndex,
-    uChromaticAberration,
-    uGlassColor,
-    uLightDirection,
-    uLightIntensity,
-    uAmbientStrength,
-    uBackgroundTexture,
-    uBackgroundChildTexture,
-    normal,
-    foregroundAlpha,
-    uSaturation,
-    uLightness,
-    rimWidthPx,
-    rimSharpness,
-    idx
-  );
+    // 6. Final Composition
+    // Delegates to the lighting model defined in shared.glsl
+    fragColor = renderLiquidGlass(
+        scaledUV,                // Background UV (scaled)
+        childUVRaw,              // Reflection/Refraction UV
+        p,                       // Local coordinates
+        uSize,                   // Viewport size
+        sdUnion,                 // Signed Distance
+        uThickness,              // Glass Thickness
+        uRefractiveIndex,
+        uChromaticAberration,
+        uGlassColor,
+        uLightDirection,
+        uLightIntensity,
+        uAmbientStrength,
+        uBackgroundTexture,
+        uBackgroundChildTexture,
+        normal,
+        foregroundAlpha,
+        uSaturation,
+        uLightness,
+        rimWidthPx,
+        rimSharpness,
+        idx
+    );
 }

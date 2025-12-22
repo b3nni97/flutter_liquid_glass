@@ -6,156 +6,126 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
 /// A callback for the [BackgroundChildSampler] widget.
-typedef SamplerBuilder = void Function(
-  ui.Image image,
-  Size size,
-  ui.Canvas canvas,
-);
+typedef SamplerBuilder = void Function(ui.Image image);
 
-class LiquidGlassBackgroundChild extends StatelessWidget {
-  const LiquidGlassBackgroundChild({
-    this.scale = const Offset(1, 1),
-    required this.child,
-    super.key,
-  });
+/// A builder that returns a [LiquidGlassBackgroundInterface].
+typedef LiquidGlassBackgroundChildBuilder = LiquidGlassBackgroundInterface
+    Function(BuildContext context);
 
-  final Widget child;
-  final Offset scale;
-
-  @override
-  Widget build(BuildContext context) {
-    return child;
-  }
+/// Interface for widgets that provide a specific texture size for sampling.
+abstract class LiquidGlassBackgroundInterface implements Widget {
+  /// The target size of the texture to be generated.
+  Size get textureSize;
 }
 
-/// Eine angepasste Version von AnimatedSampler (basierend auf dem Flutter Original),
-/// die einen [resolutionScale] akzeptiert, um den Viewport (die Bildgröße) zu erweitern,
-/// ohne den Inhalt zu zoomen.
+/// A specialized sampler that captures its child as a texture while handling
+/// resolution scaling and viewport expansion.
+///
+/// This widget captures the child into a [ui.Image] passed to [sampler],
+/// while also painting the child to the screen using a cached [ui.Picture].
 class BackgroundChildSampler extends StatelessWidget {
   /// Create a new [BackgroundChildSampler].
   const BackgroundChildSampler(
-    this.builder, {
-    required this.child,
+    this.sampler, {
+    required this.builder,
     super.key,
     this.enabled = true,
   });
 
   /// A callback used by this widget to provide the children captured in
   /// a texture.
-  final SamplerBuilder builder;
+  final SamplerBuilder sampler;
 
-  /// Whether the children should be captured in a texture or displayed as
-  /// normal.
+  /// Whether the children should be captured in a texture.
   final bool enabled;
 
-  /// The child widget.
-  final LiquidGlassBackgroundChild child;
+  /// The child widget builder.
+  final LiquidGlassBackgroundChildBuilder builder;
 
   @override
   Widget build(BuildContext context) {
-    return _ShaderSamplerBuilder(
-      builder,
-      enabled: enabled,
-      child: child,
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        return _ShaderSamplerBuilder(
+          sampler: sampler,
+          enabled: enabled,
+          child: builder(context),
+        );
+      },
     );
   }
 }
 
 class _ShaderSamplerBuilder extends SingleChildRenderObjectWidget {
-  const _ShaderSamplerBuilder(
-    this.builder, {
-    required this.child,
+  const _ShaderSamplerBuilder({
+    required this.sampler,
     required this.enabled,
-  }) : super(child: child);
+    required LiquidGlassBackgroundInterface super.child,
+  });
 
-  final SamplerBuilder builder;
-  final LiquidGlassBackgroundChild child;
+  final SamplerBuilder sampler;
   final bool enabled;
 
   @override
   RenderObject createRenderObject(BuildContext context) {
+    final LiquidGlassBackgroundInterface interfaceChild =
+        child as LiquidGlassBackgroundInterface;
     return _RenderShaderSamplerBuilderWidget(
       devicePixelRatio: MediaQuery.of(context).devicePixelRatio,
-      builder: builder,
+      sampler: sampler,
       enabled: enabled,
-      scale: child.scale,
+      textureSize: interfaceChild.textureSize,
     );
   }
 
   @override
-  void updateRenderObject(
-      BuildContext context, covariant RenderObject renderObject) {
-    (renderObject as _RenderShaderSamplerBuilderWidget)
+  void updateRenderObject(BuildContext context,
+      covariant _RenderShaderSamplerBuilderWidget renderObject) {
+    final LiquidGlassBackgroundInterface interfaceChild =
+        child as LiquidGlassBackgroundInterface;
+    renderObject
       ..devicePixelRatio = MediaQuery.of(context).devicePixelRatio
-      ..builder = builder
+      ..sampler = sampler
       ..enabled = enabled
-      ..scale = child.scale;
+      ..textureSize = interfaceChild.textureSize;
   }
 }
 
-// A render object that conditionally converts its child into a [ui.Image]
-// and then paints it in place of the child.
 class _RenderShaderSamplerBuilderWidget extends RenderProxyBox {
-  // Create a new [_RenderShaderSamplerBuilderWidget].
   _RenderShaderSamplerBuilderWidget({
     required double devicePixelRatio,
-    required SamplerBuilder builder,
+    required SamplerBuilder sampler,
     required bool enabled,
-    required Offset scale,
+    required Size textureSize,
   })  : _devicePixelRatio = devicePixelRatio,
-        _builder = builder,
+        _sampler = sampler,
         _enabled = enabled,
-        _scale = scale;
+        _textureSize = textureSize;
 
-  @override
-  OffsetLayer updateCompositedLayer(
-      {required covariant _ShaderSamplerBuilderLayer? oldLayer}) {
-    final _ShaderSamplerBuilderLayer layer =
-        oldLayer ?? _ShaderSamplerBuilderLayer(builder);
-    layer
-      ..callback = builder
-      ..size = size
-      ..devicePixelRatio = devicePixelRatio
-      ..scale = scale; // Skalierung an Layer übergeben
-    return layer;
-  }
-
-  /// The device pixel ratio used to create the child image.
-  double get devicePixelRatio => _devicePixelRatio;
   double _devicePixelRatio;
+  double get devicePixelRatio => _devicePixelRatio;
   set devicePixelRatio(double value) {
-    if (value == devicePixelRatio) {
+    if (_devicePixelRatio == value) {
       return;
     }
     _devicePixelRatio = value;
     markNeedsCompositedLayerUpdate();
   }
 
-  Offset get scale => _scale;
-  Offset _scale;
-  set scale(Offset value) {
-    if (value == scale) {
+  SamplerBuilder _sampler;
+  SamplerBuilder get sampler => _sampler;
+  set sampler(SamplerBuilder value) {
+    if (_sampler == value) {
       return;
     }
-    _scale = value;
+    _sampler = value;
     markNeedsCompositedLayerUpdate();
   }
 
-  /// The painter used to paint the child snapshot or child widgets.
-  SamplerBuilder get builder => _builder;
-  SamplerBuilder _builder;
-  set builder(SamplerBuilder value) {
-    if (value == builder) {
-      return;
-    }
-    _builder = value;
-    markNeedsCompositedLayerUpdate();
-  }
-
-  bool get enabled => _enabled;
   bool _enabled;
+  bool get enabled => _enabled;
   set enabled(bool value) {
-    if (value == enabled) {
+    if (_enabled == value) {
       return;
     }
     _enabled = value;
@@ -163,11 +133,34 @@ class _RenderShaderSamplerBuilderWidget extends RenderProxyBox {
     markNeedsCompositingBitsUpdate();
   }
 
+  Size _textureSize;
+  Size get textureSize => _textureSize;
+  set textureSize(Size value) {
+    if (_textureSize == value) {
+      return;
+    }
+    _textureSize = value;
+    markNeedsCompositedLayerUpdate();
+  }
+
+  @override
+  bool get alwaysNeedsCompositing => enabled;
+
   @override
   bool get isRepaintBoundary => alwaysNeedsCompositing;
 
   @override
-  bool get alwaysNeedsCompositing => enabled;
+  OffsetLayer updateCompositedLayer(
+      {required covariant _ShaderSamplerBuilderLayer? oldLayer}) {
+    final _ShaderSamplerBuilderLayer layer =
+        oldLayer ?? _ShaderSamplerBuilderLayer(sampler);
+    layer
+      ..callback = sampler
+      ..size = size
+      ..devicePixelRatio = devicePixelRatio
+      ..textureSize = textureSize;
+    return layer;
+  }
 
   @override
   void paint(PaintingContext context, Offset offset) {
@@ -175,112 +168,92 @@ class _RenderShaderSamplerBuilderWidget extends RenderProxyBox {
       return;
     }
     assert(!_enabled || offset == Offset.zero);
-    return super.paint(context, offset);
+    super.paint(context, offset);
   }
 }
 
-/// A [Layer] that uses an [SamplerBuilder] to create a [ui.Picture]
-/// every time it is added to a scene.
+/// A layer that creates a [ui.Picture] for the scene and a [ui.Image] for the sampler.
 class _ShaderSamplerBuilderLayer extends OffsetLayer {
   _ShaderSamplerBuilderLayer(this._callback);
 
-  ui.Picture? _lastPicture;
-
-  Size get size => _size;
-  Size _size = Size.zero;
-  set size(Size value) {
-    if (value == size) {
-      return;
-    }
-    _size = value;
-    markNeedsAddToScene();
-  }
-
-  double get devicePixelRatio => _devicePixelRatio;
-  double _devicePixelRatio = 1.0;
-  set devicePixelRatio(double value) {
-    if (value == devicePixelRatio) {
-      return;
-    }
-    _devicePixelRatio = value;
-    markNeedsAddToScene();
-  }
-
-  Offset get scale => _resolutionScale;
-  Offset _resolutionScale = const Offset(1.0, 1.0);
-  set scale(Offset value) {
-    if (value == scale) {
-      return;
-    }
-    _resolutionScale = value;
-    markNeedsAddToScene();
-  }
-
-  SamplerBuilder get callback => _callback;
   SamplerBuilder _callback;
+  SamplerBuilder get callback => _callback;
   set callback(SamplerBuilder value) {
-    if (value == callback) {
+    if (_callback == value) {
       return;
     }
     _callback = value;
     markNeedsAddToScene();
   }
 
-  ui.Image _buildChildScene(
-      Rect bounds, double pixelRatio, Offset scaleFactor) {
-    final ui.SceneBuilder builder = ui.SceneBuilder();
-
-    // 1. Inhalt-Skalierung: NUR native DPR (1:1 Inhalt, kein Zoom)
-    final Matrix4 transform =
-        Matrix4.diagonal3Values(pixelRatio, pixelRatio, 1);
-    builder.pushTransform(transform.storage);
-    addChildrenToScene(builder);
-    builder.pop();
-
-    // 2. Bild-Größe: DPR * ScaleFactor (Größeres Bild / Viewport Expansion)
-    return builder.build().toImageSync(
-          (pixelRatio * scaleFactor.dx * bounds.width).ceil(),
-          (pixelRatio * scaleFactor.dy * bounds.height).ceil(),
-        );
+  Size _size = Size.zero;
+  Size get size => _size;
+  set size(Size value) {
+    if (_size == value) {
+      return;
+    }
+    _size = value;
+    markNeedsAddToScene();
   }
 
-  @override
-  void dispose() {
-    _lastPicture?.dispose();
-    super.dispose();
+  double _devicePixelRatio = 1.0;
+  double get devicePixelRatio => _devicePixelRatio;
+  set devicePixelRatio(double value) {
+    if (_devicePixelRatio == value) {
+      return;
+    }
+    _devicePixelRatio = value;
+    markNeedsAddToScene();
+  }
+
+  Size _textureSize = Size.zero;
+  Size get textureSize => _textureSize;
+  set textureSize(Size value) {
+    if (_textureSize == value) {
+      return;
+    }
+    _textureSize = value;
+    markNeedsAddToScene();
   }
 
   @override
   void addToScene(ui.SceneBuilder builder) {
-    if (size.isEmpty) return;
-    final bounds = offset & Size(size.width, size.height);
-    // Übergabe von resolutionScale an den Build-Prozess
-    final ui.Image image = _buildChildScene(
-      bounds,
-      devicePixelRatio,
-      scale,
-    );
+    if (size.isEmpty) {
+      return;
+    }
 
-    final ui.PictureRecorder pictureRecorder = ui.PictureRecorder();
-    final Canvas canvas = Canvas(pictureRecorder);
+    final ui.Image image = _buildChildImage();
+
     try {
-      // Callback erhält die physische Größe des neuen (größeren) Bildes
-      callback(
-        image,
-        Size(
-            (devicePixelRatio * scale.dx * bounds.width)
-                .floorToDouble(), //  image.width.toDouble(),
-            (devicePixelRatio * scale.dy * bounds.height)
-                .floorToDouble() //  image.height.toDouble(),
-            ),
-        canvas,
-      );
+      // Pass the captured image to the consumer (Shader).
+      // The Shader typically maps UVs based on the virtual size vs texture size.
+      callback(image);
     } finally {
       image.dispose();
     }
-    final ui.Picture picture = pictureRecorder.endRecording();
-    _lastPicture?.dispose();
-    _lastPicture = picture;
-    builder.addPicture(offset, picture);
+  }
+
+  ui.Image _buildChildImage() {
+    final ui.SceneBuilder sceneBuilder = ui.SceneBuilder();
+
+    // Scale logic: The transform maps the logical bounds to the physical texture.
+    // We use the devicePixelRatio directly to ensure 1:1 pixel matching for the
+    // drawn content, relying on the textureSize to provide the bounds.
+    final Matrix4 effectiveTransform = Matrix4.diagonal3Values(
+      devicePixelRatio,
+      devicePixelRatio,
+      1.0,
+    );
+
+    sceneBuilder.pushTransform(effectiveTransform.storage);
+    addChildrenToScene(sceneBuilder);
+    sceneBuilder.pop();
+
+    // The image is created with the precise integer size defined by the interface.
+    // This prevents jitter as the size is stable regardless of minor scale fluctuations.
+    return sceneBuilder.build().toImageSync(
+          (textureSize.width * devicePixelRatio).round(),
+          (textureSize.height * devicePixelRatio).round(),
+        );
   }
 }

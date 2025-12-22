@@ -269,7 +269,7 @@ bool _shouldApplyCA() {
 // ────────────────────────────────────────────────────────────────────────────
 // 1) Exakter Basis-SDF der Shape
 void _readShapeRaw(int idx, out float st, out vec2 c, out vec2 sz, out float cr) {
-    int base = idx * 6;
+    int base = idx * 7;
     st = uShapeData[base + 0];
     c = vec2(uShapeData[base + 1], uShapeData[base + 2]);
     sz = vec2(uShapeData[base + 3], uShapeData[base + 4]);
