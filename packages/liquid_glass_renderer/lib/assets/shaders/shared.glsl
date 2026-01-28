@@ -80,6 +80,11 @@ float _hash12(vec2 p) {
     return fract((q.x + q.y) * q.z);
 }
 
+// NEU: Einfacher Hash für Jitter-Rauschen
+float _hashRefr(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
 // Normalizes a vector, handling zero-length cases safely.
 vec2 _safeNormalize(vec2 v) {
     float d = max(dot(v, v), LG_EPS);
@@ -108,6 +113,37 @@ vec4 _sampleTexture(sampler2D t, vec2 uv) {
     return texture(t, clamp(uv, vec2(0.0), vec2(1.0)));
 }
 
+// Simuliert Nearest-Neighbor Sampling (Pixel-Look)
+vec4 _sampleNearest(sampler2D tex, vec2 uv, vec2 texSize) {
+    // 1. UV in Pixel-Koordinaten umwandeln
+    vec2 pixel = uv * texSize;
+    
+    // 2. Auf ganze Zahlen abrunden (floor) und 0.5 addieren, 
+    // um die exakte Mitte des Texels zu treffen
+    vec2 nearestPixel = floor(pixel) + 0.5;
+    
+    // 3. Zurück in UV (0.0 bis 1.0) umrechnen
+    vec2 nearestUV = nearestPixel / texSize;
+    
+    return texture(tex, clamp(nearestUV, vec2(0.0), vec2(1.0)));
+}
+
+// NEU: Multi-Tap Jittered Blur für die Child-Texture
+// Ersetze die alte _blurJitterRefraction durch diese hier:
+vec4 _blurJitterRefraction(sampler2D tex, vec2 uv, float blurAmount, vec2 sizePx, vec2 seed) {
+    if (blurAmount <= 0.05) return _sampleNearest(tex, uv, uChildSize);
+    
+    vec2 px = 1.0 / sizePx;
+    // Nutzt bilineare Hardware-Interpolation für 4x4 Abdeckung mit nur 4 Taps
+    float s = blurAmount * 0.7; 
+    
+    vec4 col = _sampleNearest(tex, uv + vec2(-s, -s) * px, uChildSize);
+    col     += _sampleNearest(tex, uv + vec2( s, -s) * px, uChildSize);
+    col     += _sampleNearest(tex, uv + vec2(-s,  s) * px, uChildSize);
+    col     += _sampleNearest(tex, uv + vec2( s,  s) * px, uChildSize);
+    
+    return col * 0.25;
+}
 // Applies texture wrapping modes (clamp, repeat, mirror).
 vec2 _applyTileMode(vec2 uv, vec2 size, float mode) {
     if (mode < 0.5) {
@@ -355,6 +391,16 @@ vec4 _sampleRefractionAA(sampler2D tex, vec2 uv, vec2 sizePx, vec2 dirUV, float 
     return mix(base, avg, clamp(strength, 0.0, 1.0));
 }
 
+// -----------------------------------------------------------------------------
+// Helper for Hard Light Blending
+// -----------------------------------------------------------------------------
+vec3 _blendHardLight(vec3 base, vec3 blend) {
+    vec3 t1 = 2.0 * base * blend;
+    vec3 t2 = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
+    vec3 selection = step(0.5, blend);
+    return mix(t1, t2, selection);
+}
+
 // Computes dispersion color offset for chromatic aberration.
 vec3 _resolveDispersion(
     vec2 uvBase,
@@ -413,9 +459,29 @@ vec3 _resolveDispersion(
     if (!validR) sRch = sGch;
     if (!validB) sBch = sGch;
     
-    float r = mix(sRbg.r, sRch.r, sRch.a);
-    float g = mix(sGbg.g, sGch.g, sGch.a);
-    float b = mix(sBbg.b, sBch.b, sBch.a);
+    // --- UPDATED FOR HARD LIGHT SUPPORT IN CHROMATIC ABERRATION ---
+    // We un-premultiply sample channels, apply Hard Light to each shifted channel, 
+    // and extract the relevant component (R, G, or B).
+
+    // 1. Un-premultiply Child Samples
+    vec3 cR_rgb = (sRch.a > 0.001) ? sRch.rgb / sRch.a : sRch.rgb;
+    vec3 cG_rgb = (sGch.a > 0.001) ? sGch.rgb / sGch.a : sGch.rgb;
+    vec3 cB_rgb = (sBch.a > 0.001) ? sBch.rgb / sBch.a : sBch.rgb;
+
+    // 2. Apply Hard Light per channel 
+    // Red Channel Shift
+    vec3 hl_R = _blendHardLight(sRbg.rgb, cR_rgb);
+    float r = mix(sRbg.r, hl_R.r, sRch.a);
+
+    // Green Channel (Center)
+    vec3 hl_G = _blendHardLight(sGbg.rgb, cG_rgb);
+    float g = mix(sGbg.g, hl_G.g, sGch.a);
+
+    // Blue Channel Shift
+    vec3 hl_B = _blendHardLight(sBbg.rgb, cB_rgb);
+    float b = mix(sBbg.b, hl_B.b, sBch.a);
+
+    // ---------------------------------------------------------------
     
     vec3 spectralNew = vec3(r, g, b);
     vec3 diff = spectralNew - baseColor.rgb;
@@ -426,6 +492,7 @@ vec3 _resolveDispersion(
 }
 
 // Calculates refraction, including anti-aliasing and chromatic aberration.
+// MODIFIZIERT: Hintergrund nutzt Gaussian, Child nutzt Jitter-Blur.
 vec4 _calculateRefractionLayer(
     vec2 screenUV, vec3 normal, float sd, float height, float thickness,
     float refractiveIndex, float chromaticAberration,
@@ -455,10 +522,29 @@ vec4 _calculateRefractionLayer(
     refractionDisplacement = dispPx / sizePx;
     
     vec2 uvBase = screenUV + refractionDisplacement;
+    vec2 uvChild = childUVBase + refractionDisplacement;
+
+    // Adaptiver Blur Radius für die Child-Texture
+    float stretch = length(fwidth(dispPx));
+    float blurRadius = clamp(stretch * 0.45, 0.0, 6.0);
+
+    // HINTERGRUND: Gaussian Blur (wie gewünscht)
     vec4 gS = _applyGaussianBlur(backgroundTexture, uvBase);
-    vec4 cS = _sampleTexture(childTexture, childUVBase + refractionDisplacement);
     
-    gS = mix(gS, cS, cS.a);
+    // CHILD: Jitter Blur (gegen Pixelbildung an Kanten)
+    vec4 cS = _blurJitterRefraction(childTexture, uvChild, blurRadius, sizePx, uvChild);
+    
+    // --- MODIFIED FOR HARD LIGHT ---
+    // 1. Un-premultiply to get correct color for blending
+    vec3 childRGB = (cS.a > 0.001) ? cS.rgb / cS.a : cS.rgb;
+    
+    // 2. Compute Hard Light blend
+    vec3 blended = _blendHardLight(gS.rgb, childRGB);
+    
+    // 3. Apply blend only where child texture exists (masking by alpha)
+    gS.rgb = mix(gS.rgb, blended, cS.a);
+    // --------------------------------
+    
     float ca = max(chromaticAberration, 0.0);
     
     if (ca <= 1e-4) return gS;
@@ -470,7 +556,13 @@ vec4 _calculateRefractionLayer(
         float(LG_REFRACT_AA_STRENGTH),
         1.4 
     );
-    gS = mix(baseAA, cS, cS.a);
+    
+    // --- UPDATED FOR CA BRANCH TO USE HARD LIGHT TOO ---
+    // When CA is active, we use baseAA (anti-aliased background) as the base.
+    // We must apply Hard Light blending here as well, otherwise it reverts to Normal mix.
+    vec3 blendedAA = _blendHardLight(baseAA.rgb, childRGB);
+    gS = vec4(mix(baseAA.rgb, blendedAA, cS.a), baseAA.a);
+    // ---------------------------------------------------
 
     vec3 diffNew = _resolveDispersion(
         uvBase, childUVBase, refractionDisplacement, sizePx,

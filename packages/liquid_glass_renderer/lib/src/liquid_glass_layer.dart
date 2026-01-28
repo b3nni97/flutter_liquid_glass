@@ -463,7 +463,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   }
 
   /// Determines the union bounds of all shapes and inflates them for the blur effect.
-  (Rect unionBounds, Rect clipBounds) _computeUnionAndClipRect(
+  Rect _computeClipRect(
     List<_ActiveShape> shapes,
   ) {
     Rect? union;
@@ -482,7 +482,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     final double margin = (_settings.blur * 3.0) + _settings.thickness + 12.0;
     final Rect clipBounds = unionBounds.inflate(margin);
 
-    return (unionBounds, clipBounds);
+    return clipBounds;
   }
 
   /// Clamps the layer bounds to the viewport to prevent rendering into void space.
@@ -559,7 +559,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     required List<_OwnedTouch> ownedTouches,
     required Rect bounds,
     required Offset offset,
-    required Rect clipBounds,
   }) {
     final bool settingsChanged = _lastSettings != _settings;
     final bool shapesChanged = _shapesChanged(shapes);
@@ -916,12 +915,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     final List<_OwnedTouch> ownedTouches = _combineTouches(shapes);
 
     // Compute geometry
-    Rect unionBounds, clipBounds;
-    (unionBounds, clipBounds) = _computeUnionAndClipRect(shapes);
-    clipBounds = _clampBoundsToViewport(clipBounds, offset);
-
-    // Snap logic for pixel-perfect sampling
-    final Rect bounds = _snapBoundsForBackdrop(clipBounds, offset);
+    Rect clipBounds = _computeClipRect(shapes);
+    clipBounds = _snapBoundsForBackdrop(
+        _clampBoundsToViewport(clipBounds, offset), offset);
 
     // Upload
     _uploadUniformsIfNeeded(
@@ -930,9 +926,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       nKernel: nKernel,
       kernel: kernel,
       ownedTouches: ownedTouches,
-      bounds: bounds,
+      bounds: clipBounds,
       offset: offset,
-      clipBounds: clipBounds,
     );
 
     // Set Image Sampler
@@ -967,14 +962,14 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     context.pushClipRect(
       true,
       offset,
-      bounds,
+      clipBounds,
       (PaintingContext ctxRect, Offset offRect) {
         ctxRect.pushLayer(
           backdropLayer,
           (PaintingContext childCtx, Offset childOff) {
             // Draw a transparent rect to trigger the backdrop filter
             childCtx.canvas.drawRect(
-              bounds.shift(-childOff),
+              clipBounds.shift(-childOff),
               Paint()..color = const Color(0x00000000),
             );
           },

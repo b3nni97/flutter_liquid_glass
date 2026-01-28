@@ -132,7 +132,7 @@ class LiquidGlassSettings with EquatableMixin {
     this.blur = 0,
     this.chromaticAberration = 0,
     this.blend = 20,
-    this.lightAngle = 0.5 * pi,
+    this.lightAngle = pi / 4,
     this.lightIntensity = .2,
     this.ambientStrength = .01,
     this.refractiveIndex = 1.51,
@@ -157,7 +157,7 @@ class LiquidGlassSettings with EquatableMixin {
     required double dispersion, // 0..100
     required double frost, // => blur (Sigma)
     double lightIntensity = 50, // 0..100
-    double lightAngle = 0.5 * pi,
+    double lightAngle = pi / 4,
     double blend = 20,
     Color glassColor = const Color.fromARGB(0, 255, 255, 255),
     double rimWidthPx = 1.5,
