@@ -115,26 +115,17 @@ vec4 _sampleTexture(sampler2D t, vec2 uv) {
 
 // Simuliert Nearest-Neighbor Sampling (Pixel-Look)
 vec4 _sampleNearest(sampler2D tex, vec2 uv, vec2 texSize) {
-    // 1. UV in Pixel-Koordinaten umwandeln
     vec2 pixel = uv * texSize;
-    
-    // 2. Auf ganze Zahlen abrunden (floor) und 0.5 addieren, 
-    // um die exakte Mitte des Texels zu treffen
     vec2 nearestPixel = floor(pixel) + 0.5;
-    
-    // 3. Zurück in UV (0.0 bis 1.0) umrechnen
     vec2 nearestUV = nearestPixel / texSize;
-    
     return texture(tex, clamp(nearestUV, vec2(0.0), vec2(1.0)));
 }
 
 // NEU: Multi-Tap Jittered Blur für die Child-Texture
-// Ersetze die alte _blurJitterRefraction durch diese hier:
 vec4 _blurJitterRefraction(sampler2D tex, vec2 uv, float blurAmount, vec2 sizePx, vec2 seed) {
     if (blurAmount <= 0.05) return _sampleNearest(tex, uv, uChildSize);
     
     vec2 px = 1.0 / sizePx;
-    // Nutzt bilineare Hardware-Interpolation für 4x4 Abdeckung mit nur 4 Taps
     float s = blurAmount * 0.7; 
     
     vec4 col = _sampleNearest(tex, uv + vec2(-s, -s) * px, uChildSize);
@@ -144,6 +135,7 @@ vec4 _blurJitterRefraction(sampler2D tex, vec2 uv, float blurAmount, vec2 sizePx
     
     return col * 0.25;
 }
+
 // Applies texture wrapping modes (clamp, repeat, mirror).
 vec2 _applyTileMode(vec2 uv, vec2 size, float mode) {
     if (mode < 0.5) {
@@ -398,11 +390,10 @@ vec3 _blendHardLight(vec3 base, vec3 blend) {
     vec3 t1 = 2.0 * base * blend;
     vec3 t2 = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
     vec3 selection = step(0.5, blend);
-    return blend;
     return mix(t1, t2, selection);
 }
 
-// Computes dispersion color offset for chromatic aberration.
+// MODIFIZIERT: Hybrid-Ansatz -> Original-Optik verstärkt durch Refraction-Stärke
 vec3 _resolveDispersion(
     vec2 uvBase,
     vec2 childUVBase,
@@ -435,7 +426,18 @@ vec3 _resolveDispersion(
     vec2 minDimOverSize = vec2(minDimScreen / sizePx.x, minDimScreen / sizePx.y);
     vec2 dist3 = distUV * distUV * distUV;
     
-    vec2 aberrUV = dispersion * dist3 * minDimOverSize;
+    // --- HYBRID LOGIK HIER ---
+    // 1. Wir nutzen 'dist3' (Entfernung zur Mitte) für die Form/Richtung (Lens Look).
+    // 2. Wir messen 'refractionDisplacement' für die Verzerrungs-Intensität.
+    // 3. Wir multiplizieren beides: Die CA ist stark, wo es "außen" ist UND "verzerrt".
+    
+    float distortMag = length(refractionDisplacement);
+    // Faktor 40.0 ist ein Gain, da Displacement in UV-Space sehr klein ist (z.B. 0.005)
+    float boost = 1.0 + (distortMag * 100.0);
+    
+    // Original Formel * Boost
+    vec2 aberrUV = (dispersion * dist3 * minDimOverSize) * boost;
+    
     vec2 uvR = uvBase - aberrUV;
     vec2 uvG = uvBase;
     vec2 uvB = uvBase + aberrUV;
@@ -460,29 +462,19 @@ vec3 _resolveDispersion(
     if (!validR) sRch = sGch;
     if (!validB) sBch = sGch;
     
-    // --- UPDATED FOR HARD LIGHT SUPPORT IN CHROMATIC ABERRATION ---
-    // We un-premultiply sample channels, apply Hard Light to each shifted channel, 
-    // and extract the relevant component (R, G, or B).
-
-    // 1. Un-premultiply Child Samples
+    // Hard Light Blending
     vec3 cR_rgb = (sRch.a > 0.001) ? sRch.rgb / sRch.a : sRch.rgb;
     vec3 cG_rgb = (sGch.a > 0.001) ? sGch.rgb / sGch.a : sGch.rgb;
     vec3 cB_rgb = (sBch.a > 0.001) ? sBch.rgb / sBch.a : sBch.rgb;
 
-    // 2. Apply Hard Light per channel 
-    // Red Channel Shift
     vec3 hl_R = _blendHardLight(sRbg.rgb, cR_rgb);
     float r = mix(sRbg.r, hl_R.r, sRch.a);
 
-    // Green Channel (Center)
     vec3 hl_G = _blendHardLight(sGbg.rgb, cG_rgb);
     float g = mix(sGbg.g, hl_G.g, sGch.a);
 
-    // Blue Channel Shift
     vec3 hl_B = _blendHardLight(sBbg.rgb, cB_rgb);
     float b = mix(sBbg.b, hl_B.b, sBch.a);
-
-    // ---------------------------------------------------------------
     
     vec3 spectralNew = vec3(r, g, b);
     vec3 diff = spectralNew - baseColor.rgb;
@@ -493,7 +485,6 @@ vec3 _resolveDispersion(
 }
 
 // Calculates refraction, including anti-aliasing and chromatic aberration.
-// MODIFIZIERT: Hintergrund nutzt Gaussian, Child nutzt Jitter-Blur.
 vec4 _calculateRefractionLayer(
     vec2 screenUV, vec3 normal, float sd, float height, float thickness,
     float refractiveIndex, float chromaticAberration,
@@ -535,16 +526,10 @@ vec4 _calculateRefractionLayer(
     // CHILD: Jitter Blur (gegen Pixelbildung an Kanten)
     vec4 cS = _blurJitterRefraction(childTexture, uvChild, blurRadius, sizePx, uvChild);
     
-    // --- MODIFIED FOR HARD LIGHT ---
-    // 1. Un-premultiply to get correct color for blending
+    // --- Hard Light Blending ---
     vec3 childRGB = (cS.a > 0.001) ? cS.rgb / cS.a : cS.rgb;
-    
-    // 2. Compute Hard Light blend
     vec3 blended = _blendHardLight(gS.rgb, childRGB);
-    
-    // 3. Apply blend only where child texture exists (masking by alpha)
     gS.rgb = mix(gS.rgb, blended, cS.a);
-    // --------------------------------
     
     float ca = max(chromaticAberration, 0.0);
     
@@ -558,12 +543,8 @@ vec4 _calculateRefractionLayer(
         1.4 
     );
     
-    // --- UPDATED FOR CA BRANCH TO USE HARD LIGHT TOO ---
-    // When CA is active, we use baseAA (anti-aliased background) as the base.
-    // We must apply Hard Light blending here as well, otherwise it reverts to Normal mix.
     vec3 blendedAA = _blendHardLight(baseAA.rgb, childRGB);
     gS = vec4(mix(baseAA.rgb, blendedAA, cS.a), baseAA.a);
-    // ---------------------------------------------------
 
     vec3 diffNew = _resolveDispersion(
         uvBase, childUVBase, refractionDisplacement, sizePx,
