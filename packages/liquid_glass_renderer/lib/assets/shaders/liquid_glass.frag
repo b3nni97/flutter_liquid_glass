@@ -9,6 +9,7 @@ precision mediump int;
 // Uniform Layouts
 // -----------------------------------------------------------------------------
 
+// Basic Props
 layout(location = 0) uniform vec2 uSize;
 layout(location = 1) uniform vec4 uGlassColor;
 layout(location = 2) uniform vec4 uOpticalProps;
@@ -18,29 +19,41 @@ layout(location = 5) uniform vec2 uLightDirection;
 layout(location = 6) uniform mat4 uTransform;
 layout(location = 10) uniform vec2 uRimParams;
 
+// Shapes
 #define MAX_SHAPES 16
-layout(location = 11) uniform float uShapeData[MAX_SHAPES * 7];
+layout(location = 11) uniform float uShapeData[MAX_SHAPES * 7]; // Ends ~122
 
+// Blur
 layout(location = 123) uniform vec4 uBlurHeader;
-layout(location = 124) uniform vec4 u_samples[50];
+layout(location = 124) uniform vec4 u_samples[50]; // Ends ~174
 
+// Touches
 #define MAX_TOUCHES 8
 layout(location = 324) uniform float uTouchCount_f;
-layout(location = 325) uniform vec4 uTouches[MAX_TOUCHES];
-layout(location = 333) uniform float uTouchOwners[MAX_TOUCHES];
+layout(location = 325) uniform vec4 uTouches[MAX_TOUCHES]; // Ends 332
+layout(location = 333) uniform float uTouchOwners[MAX_TOUCHES]; // Ends 340
 
-layout(location = 341) uniform vec4 uGlowParams;
-layout(location = 342) uniform vec4 uGlowColor;
-layout(location = 343) uniform vec4 uGlowOverrides;
-layout(location = 344) uniform vec4 uGlowFlags;
-layout(location = 345) uniform vec4 uGlowGlass;
-layout(location = 346) uniform float uGlobalBlurSigma;
-layout(location = 347) uniform float uTouchGlowStrengths[MAX_TOUCHES];
+// --- NEU: Glow & Overrides ---
+// Reihenfolge muss exakt match Dart sein!
 
-layout(location = 355) uniform vec2 uBgScale;
-layout(location = 357) uniform vec2 uNormalParams;
-layout(location = 425) uniform vec4 uChildProjection;
-layout(location = 429) uniform vec2 uChildSize;
+// 1. Global Blur Sigma (1 Slot)
+layout(location = 341) uniform float uGlobalBlurSigma;
+
+// 2. Touch Glow Strengths (8 Slots)
+layout(location = 342) uniform float uTouchGlowStrengths[MAX_TOUCHES]; // Ends 349
+
+// 3. Shape Glow Data Array
+// Größe: 16 Shapes * 4 vec4s = 64 Locations
+// Start: 350. Ende: 350 + 64 = 414.
+layout(location = 350) uniform vec4 uShapeGlowData[MAX_SHAPES * 4];
+
+// --- Projection & Environment (Nach hinten geschoben) ---
+// Startet ab 414
+
+layout(location = 414) uniform vec2 uBgScale;
+layout(location = 416) uniform vec2 uNormalParams; // +2 Gap (wie vorher)
+layout(location = 418) uniform vec4 uChildProjection;
+layout(location = 422) uniform vec2 uChildSize;
 
 uniform sampler2D uBackgroundTexture;
 uniform sampler2D uBackgroundChildTexture;

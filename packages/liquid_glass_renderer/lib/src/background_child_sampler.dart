@@ -251,9 +251,14 @@ class _ShaderSamplerBuilderLayer extends OffsetLayer {
 
     // The image is created with the precise integer size defined by the interface.
     // This prevents jitter as the size is stable regardless of minor scale fluctuations.
+
+    final physicalWidth = (textureSize.width * devicePixelRatio).ceilToDouble();
+    final physicalHeight =
+        (textureSize.height * devicePixelRatio).ceilToDouble();
+
     return sceneBuilder.build().toImageSync(
-          (textureSize.width * devicePixelRatio).round(),
-          (textureSize.height * devicePixelRatio).round(),
+          physicalWidth.toInt(),
+          physicalHeight.toInt(),
         );
   }
 }

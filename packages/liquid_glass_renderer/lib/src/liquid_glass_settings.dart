@@ -140,7 +140,7 @@ class LiquidGlassSettings with EquatableMixin {
     this.lightness = 1.0,
     this.rimWidthPx = 1.5,
     this.rimSharpness = 0.9,
-    this.glow = const GlowStyle(),
+    this.glowStyle = const GlowStyle(),
 
     // globaler Skalierungsfaktor für den Hintergrund im Shape (x, y)
     this.backgroundScale = const Offset(1.0, 1.0),
@@ -179,7 +179,7 @@ class LiquidGlassSettings with EquatableMixin {
           glassColor: glassColor,
           rimWidthPx: rimWidthPx,
           rimSharpness: rimSharpness,
-          glow: glow,
+          glowStyle: glow,
           // backgroundScale bleibt beim Default Offset(1,1)
           // normalPlateauWidth & normalSoftness bleiben bei ihren Defaults
         );
@@ -226,7 +226,7 @@ class LiquidGlassSettings with EquatableMixin {
   final double rimSharpness;
 
   /// Einziger dynamischer Overlay-/Hotspot-Stil (Glow + optionale Overrides).
-  final GlowStyle glow;
+  final GlowStyle glowStyle;
 
   /// Skalierung des durchscheinenden Hintergrunds innerhalb der Shapes.
   /// Offset(1,1) = unverändert, >1 = Zoom-in, <1 = Zoom-out (pro Achse).
@@ -273,7 +273,7 @@ class LiquidGlassSettings with EquatableMixin {
       lightness: lightness ?? this.lightness,
       rimWidthPx: rimWidthPx ?? this.rimWidthPx,
       rimSharpness: rimSharpness ?? this.rimSharpness,
-      glow: glow ?? this.glow,
+      glowStyle: glow ?? this.glowStyle,
       backgroundScale: backgroundScale ?? this.backgroundScale,
       normalPlateauWidth: normalPlateauWidth ?? this.normalPlateauWidth,
       normalSoftness: normalSoftness ?? this.normalSoftness,
@@ -307,7 +307,7 @@ class LiquidGlassSettings with EquatableMixin {
       rimSharpness: lerpDouble(a.rimSharpness, b.rimSharpness, t)!,
 
       // Glow via eigene Lerp
-      glow: GlowStyle.lerp(a.glow, b.glow, t),
+      glowStyle: GlowStyle.lerp(a.glowStyle, b.glowStyle, t),
 
       backgroundScale: Offset.lerp(a.backgroundScale, b.backgroundScale, t)!,
       normalPlateauWidth:
@@ -331,7 +331,7 @@ class LiquidGlassSettings with EquatableMixin {
         lightness,
         rimWidthPx,
         rimSharpness,
-        glow,
+        glowStyle,
         backgroundScale,
         normalPlateauWidth,
         normalSoftness,

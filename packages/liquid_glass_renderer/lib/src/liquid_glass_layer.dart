@@ -302,19 +302,18 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _idxTouchCount = 352;
   static const int _idxTouches = 353; // 8 * vec4
   static const int _idxTouchOwners = 385; // float[8]
-  static const int _idxGlowParams = 393; // vec4
-  static const int _idxGlowColor = 397; // vec4
-  static const int _idxGlowOverrides = 401; // vec4
-  static const int _idxGlowFlags = 405; // vec4
-  static const int _idxGlowGlass = 409; // vec4
-  static const int _idxGlobalBlurSigma = 413; // float
-  static const int _idxTouchGlowStrengths = 414; // float[8]
 
-  // Projection & Environment
-  static const int _idxBgScale = 422; // vec2
-  static const int _idxNormalParams = 424; // vec2
-  static const int _idxChildProjection = 426; // vec4
-  static const int _idxChildSize = 430; // vec2
+// NEU: Inserted after TouchOwners (393)
+  static const int _idxGlobalBlurSigma = 393; // float -> Ends at 394
+  static const int _idxTouchGlowStrengths = 394; // float[8] -> Ends at 402
+  static const int _idxShapeGlowData =
+      402; // vec4 array [MAX_SHAPES * 3] -> Ends at 594
+
+  // Projection & Environment (Shifted by new data)
+  static const int _idxBgScale = 658;
+  static const int _idxNormalParams = 660;
+  static const int _idxChildProjection = 662;
+  static const int _idxChildSize = 666;
 
   static const int _maxShapesPerLayer = 16;
   static const double _epsilon = 0.01;
@@ -581,7 +580,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _uploadBlurKernels(nKernel, kernel);
 
     // 4. Update Touch & Glow
-    _uploadTouchAndGlow(ownedTouches);
+    // NEU: Wir übergeben 'shapes', um auf die individuellen Glow-Daten zuzugreifen
+    _uploadTouchAndGlow(ownedTouches, shapes);
 
     _lastSettings = _settings;
     _lastShapeCount = shapeCount;
@@ -755,7 +755,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     }
   }
 
-  void _uploadTouchAndGlow(List<_OwnedTouch> ownedTouches) {
+  void _uploadTouchAndGlow(
+      List<_OwnedTouch> ownedTouches, List<_ActiveShape> shapes) {
+    // 1. Upload Touch Points (Pool)
     final int nTouches = ownedTouches.length.clamp(0, 8);
     _shader.setFloat(_idxTouchCount, nTouches.toDouble());
 
@@ -790,47 +792,65 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       _shader.setFloat(_idxTouchGlowStrengths + i, s);
     }
 
-    // Glow configuration
-    final GlowStyle glow = _settings.glow;
-    final bool glowOn = glow.enabled;
+    for (int i = 0; i < shapes.length; i++) {
+      final GlowStyle activeStyle = shapes[i].$1.glow ?? _settings.glowStyle;
 
-    _shader
-      ..setFloat(_idxGlowParams + 0, glowOn ? glow.strength : 0.0)
-      ..setFloat(_idxGlowParams + 1, glow.power)
-      ..setFloat(_idxGlowParams + 2, glow.tintMode.toDouble())
-      ..setFloat(_idxGlowParams + 3, glow.insideOnly ? 1.0 : 0.0);
+      // Wenn kein Glow, müssen wir den Speicherbereich nullen (alle 16 Floats)
+      if (!activeStyle.enabled) {
+        final int baseIdx = _idxShapeGlowData + (i * 16); // 16 Floats stride
+        for (int k = 0; k < 16; k++) {
+          _shader.setFloat(baseIdx + k, 0.0);
+        }
+        continue;
+      }
 
-    _shader
-      ..setFloat(_idxGlowColor + 0, glow.color.red / 255.0)
-      ..setFloat(_idxGlowColor + 1, glow.color.green / 255.0)
-      ..setFloat(_idxGlowColor + 2, glow.color.blue / 255.0)
-      ..setFloat(_idxGlowColor + 3, glow.color.alpha / 255.0);
+      // Offset: i * 4 vec4s * 4 floats = i * 16
+      final int baseIdx = _idxShapeGlowData + (i * 16);
 
-    final double targetLightness = glow.lightness ?? _settings.lightness;
-    final double targetSaturation = glow.saturation ?? _settings.saturation;
-    final double targetBlurSigmaPx =
-        (glow.blur ?? _settings.blur) * _devicePixelRatio;
+      final Color c = activeStyle.color;
+      final double l = activeStyle.lightness ?? -1.0;
+      final double s = activeStyle.saturation ?? -1.0;
+      final double b = activeStyle.blur != null
+          ? (activeStyle.blur! * _devicePixelRatio)
+          : -1.0;
 
-    _shader
-      ..setFloat(_idxGlowOverrides + 0, targetLightness)
-      ..setFloat(_idxGlowOverrides + 1, targetSaturation)
-      ..setFloat(_idxGlowOverrides + 2, targetBlurSigmaPx)
-      ..setFloat(_idxGlowOverrides + 3, glowOn ? glow.mix : 0.0);
+      // LOGIK FÜR GLOW GLASS (Ersetzt Flag):
+      // Wenn activeStyle.glassColor gesetzt ist -> Nimm es.
+      // Wenn nicht -> Nimm die globale settings.glassColor.
+      // (Blendet dann von Global zu Global = keine Änderung, genau wie gewünscht).
+      final Color glassOverride =
+          activeStyle.glassColor ?? _settings.glassColor;
 
-    double flag(bool cond) => (glowOn && cond) ? 1.0 : 0.0;
-    _shader
-      ..setFloat(_idxGlowFlags + 0, flag(glow.lightness != null))
-      ..setFloat(_idxGlowFlags + 1, flag(glow.saturation != null))
-      ..setFloat(_idxGlowFlags + 2, flag(glow.blur != null))
-      ..setFloat(_idxGlowFlags + 3, flag(glow.glassColor != null));
+      // Vec 0: Color RGB, Strength
+      _shader
+        ..setFloat(baseIdx + 0, c.red / 255.0)
+        ..setFloat(baseIdx + 1, c.green / 255.0)
+        ..setFloat(baseIdx + 2, c.blue / 255.0)
+        ..setFloat(baseIdx + 3, c.alpha / 255.0);
 
-    final Color gg = glow.glassColor ?? const Color(0x00000000);
-    _shader
-      ..setFloat(_idxGlowGlass + 0, gg.red / 255.0)
-      ..setFloat(_idxGlowGlass + 1, gg.green / 255.0)
-      ..setFloat(_idxGlowGlass + 2, gg.blue / 255.0)
-      ..setFloat(_idxGlowGlass + 3, gg.alpha / 255.0);
+      // Vec 1: Power, Mix, Blur, InsideOnly
+      _shader
+        ..setFloat(baseIdx + 4, activeStyle.power)
+        ..setFloat(baseIdx + 5, activeStyle.mix)
+        ..setFloat(baseIdx + 6, b)
+        ..setFloat(baseIdx + 7, activeStyle.insideOnly ? 1.0 : 0.0);
 
+      // Vec 2: Lightness, Saturation, TintMode, Unused
+      _shader
+        ..setFloat(baseIdx + 8, l)
+        ..setFloat(baseIdx + 9, s)
+        ..setFloat(baseIdx + 10, activeStyle.tintMode.toDouble())
+        ..setFloat(baseIdx + 11, activeStyle.strength);
+
+      // Vec 3 (NEU): Glow Glass Color (RGBA)
+      _shader
+        ..setFloat(baseIdx + 12, glassOverride.red / 255.0)
+        ..setFloat(baseIdx + 13, glassOverride.green / 255.0)
+        ..setFloat(baseIdx + 14, glassOverride.blue / 255.0)
+        ..setFloat(baseIdx + 15, glassOverride.alpha / 255.0);
+    }
+
+    // Global Blur Sigma noch setzen
     _shader.setFloat(
       _idxGlobalBlurSigma,
       _settings.blur * _devicePixelRatio,

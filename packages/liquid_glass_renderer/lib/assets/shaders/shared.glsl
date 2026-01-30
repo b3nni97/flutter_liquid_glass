@@ -398,6 +398,7 @@ vec3 _blendHardLight(vec3 base, vec3 blend) {
     vec3 t1 = 2.0 * base * blend;
     vec3 t2 = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
     vec3 selection = step(0.5, blend);
+    return blend;
     return mix(t1, t2, selection);
 }
 
@@ -719,39 +720,52 @@ vec4 _applyInteractiveGlow(
     float saturation,
     vec3 backgroundColor
 ) {
-    float gStrength = uGlowParams.x;
-    float gPower = max(uGlowParams.y, 0.0001);
-    float gTintMode = uGlowParams.z;
-    float gInside = uGlowParams.w;
+    // Basic Check
+    if (currentShapeIdx < 0 || uTouchCount_f <= 0.5) return coloredBase;
+
+    // 1. Daten für dieses Shape aus dem Array lesen
+    int baseIdx = currentShapeIdx * 4;
     
-    if (gStrength <= 0.0001 || uTouchCount_f <= 0.5) {
+    vec4 data0 = uShapeGlowData[baseIdx + 0]; // RGB=Color, W=ColorAlpha (NEU)
+    vec4 data1 = uShapeGlowData[baseIdx + 1]; // X=Power, Y=Mix, Z=Blur, W=Inside
+    vec4 data2 = uShapeGlowData[baseIdx + 2]; // X=Light, Y=Sat, Z=TintMode, W=Strength (NEU)
+    vec4 data3 = uShapeGlowData[baseIdx + 3]; // RGBA=GlowGlassOverride
+
+    // Strength kommt jetzt aus data2.w
+    float gStrength = data2.w;
+    
+    // Early Exit Check
+    if (gStrength <= 0.0001) {
         return coloredBase;
     }
     
+    float gInside = data1.w;
     float maskRaw = _computeTouchGlowMask(p, p, gInside, sd, currentShapeIdx);
+    
     if (maskRaw <= 0.0) {
         return coloredBase;
     }
     
-    float oMix = clamp(uGlowOverrides.w, 0.0, 1.0);
-    float shaped = pow(clamp(maskRaw, 0.0, 1.0), gPower) * gStrength * oMix;
+    float gPower = max(data1.x, 0.0001);
+    float gMix = clamp(data1.y, 0.0, 1.0);
+    
+    float shaped = pow(clamp(maskRaw, 0.0, 1.0), gPower) * gStrength * gMix;
     shaped = clamp(shaped, 0.0, 1.0);
 
-    float hasL = uGlowFlags.x;
-    float hasS = uGlowFlags.y;
-    float hasB = uGlowFlags.z;
-    float hasG = uGlowFlags.w;
-    
-    float tLight = (hasL > 0.5) ? uGlowOverrides.x : lightness;
-    float tSatu = (hasS > 0.5) ? uGlowOverrides.y : saturation;
-    vec4 tGlass = (hasG > 0.5) ? uGlowGlass : uGlassColor;
+    // Overrides prüfen (-1.0 bedeutet "nicht gesetzt")
+    float tLight = data2.x;
+    float tSatu  = data2.y;
+    // Glass Tint Override (Wenn nicht gesetzt, ist es die globale Farbe)
+    vec4 tGlass  = data3;
 
-    float effLight = mix(lightness, tLight, shaped);
-    float effSatu = mix(saturation, tSatu, shaped);
-    vec4 effGlass = mix(uGlassColor, tGlass, shaped);
+    float effLight = (tLight > -0.5) ? mix(lightness, tLight, shaped) : lightness;
+    float effSatu  = (tSatu > -0.5)  ? mix(saturation, tSatu, shaped) : saturation;
+    vec4 effGlass  = mix(uGlassColor, tGlass, shaped);
 
+    // Blur Override
     vec4 refractLocal = refractColorBase;
-    float extraSigma = (hasB > 0.5) ? max(uGlowOverrides.z - uGlobalBlurSigma, 0.0) : 0.0;
+    float tBlur = data1.z;
+    float extraSigma = (tBlur > -0.5) ? max(tBlur - uGlobalBlurSigma, 0.0) : 0.0;
     
     if (extraSigma > 0.01) {
         vec2 uvBase = screenUV + refractionDisplacement;
@@ -764,16 +778,23 @@ vec4 _applyInteractiveGlow(
     coloredLocal.rgb += lighting;
     coloredLocal.rgb = _adjustColorBalance(coloredLocal.rgb, effSatu, effLight);
 
+    // Tint Mode Logic
+    float gTintMode = data2.z;
+    float colorAlpha = data0.w; // NEU: Alpha kommt jetzt aus data0.w
+
     vec3 tint;
     if (gTintMode < 0.5) {
-        tint = vec3(1.0);
+        tint = vec3(1.0); // Weiß
     } else if (gTintMode < 1.5) {
-        tint = _computeAdaptiveHighlight(backgroundColor, 1.0);
+        tint = _computeAdaptiveHighlight(backgroundColor, 1.0); // Adaptiv
     } else {
-        tint = uGlowColor.rgb;
+        tint = data0.rgb; // Custom Color
     }
     
-    vec4 tintGlass = vec4(tint, clamp(uGlowColor.a, 0.0, 1.0) * shaped);
+    // Tint auftragen. 
+    // Wir multiplizieren die Stärke des Effekts (shaped) mit dem Alpha der Farbe.
+    vec4 tintGlass = vec4(tint, shaped * colorAlpha); 
+    
     coloredLocal = _blendGlassTint(coloredLocal, tintGlass);
     
     return mix(coloredBase, coloredLocal, shaped);

@@ -33,7 +33,8 @@ class LiquidGlass extends StatelessWidget {
     this.touches = const <TouchPoint>[],
     this.settings = const LiquidGlassSettings(),
     super.key,
-  }) : _isStandalone = true;
+  })  : _isStandalone = true,
+        glowStyle = null;
 
   /// Creates a liquid glass shape that joins an existing [LiquidGlassLayer].
   ///
@@ -47,6 +48,7 @@ class LiquidGlass extends StatelessWidget {
     this.glassContainsChild = true,
     this.clipBehavior = Clip.hardEdge,
     this.touches = const <TouchPoint>[],
+    this.glowStyle,
   })  : _isStandalone = false,
         settings = null,
         restrictThickness = false;
@@ -73,6 +75,10 @@ class LiquidGlass extends StatelessWidget {
   /// Configuration settings. Only used in standalone mode.
   final LiquidGlassSettings? settings;
 
+  /// Optional glow style specific to this shape (only used in InLayer mode).
+  /// If null, the global glow style from the layer's settings will be used.
+  final GlowStyle? glowStyle;
+
   final bool _isStandalone;
 
   @override
@@ -85,6 +91,7 @@ class LiquidGlass extends StatelessWidget {
         shape: shape,
         glassContainsChild: glassContainsChild,
         localTouches: touches,
+        glow: glowStyle,
         link: GlassScope.of(context),
         child: ClipPath(
           clipper: ShapeBorderClipper(shape: shape),
@@ -121,12 +128,14 @@ class _LiquidGlassShapeWidget extends SingleChildRenderObjectWidget {
     required this.shape,
     required this.glassContainsChild,
     required this.localTouches,
+    required this.glow, // <--- NEU: Parameter hinzufügen
     required this.link,
   });
 
   final LiquidShape shape;
   final bool glassContainsChild;
   final List<TouchPoint> localTouches;
+  final GlowStyle? glow; // <--- NEU: Feld hinzufügen
   final GlassLink link;
 
   @override
@@ -135,6 +144,7 @@ class _LiquidGlassShapeWidget extends SingleChildRenderObjectWidget {
       shape: shape,
       glassContainsChild: glassContainsChild,
       localTouches: localTouches,
+      glow: glow, // <--- NEU: Weitergeben an RenderObject
       link: link,
     );
   }
@@ -148,16 +158,12 @@ class _LiquidGlassShapeWidget extends SingleChildRenderObjectWidget {
       ..shape = shape
       ..glassContainsChild = glassContainsChild
       ..localTouches = localTouches
+      ..glow = glow // <--- NEU: Update setzen
       ..link = link;
   }
 }
 
 /// A RenderProxyBox that registers itself with a [GlassLink].
-///
-/// This RenderObject does not paint itself directly in the standard [paint] pass.
-/// Instead, it registers its geometry and configuration with the [GlassLink],
-/// which is read by the [RenderLiquidGlassLayer]. The layer then calls
-/// [paintFromLayer] at the appropriate time in the shader pipeline.
 @internal
 class RenderLiquidGlass extends RenderProxyBox {
   RenderLiquidGlass({
@@ -165,9 +171,11 @@ class RenderLiquidGlass extends RenderProxyBox {
     required bool glassContainsChild,
     required GlassLink link,
     List<TouchPoint> localTouches = const <TouchPoint>[],
+    GlowStyle? glow, // <--- NEU: Optionaler Parameter
   })  : _shape = shape,
         _glassContainsChild = glassContainsChild,
         _localTouches = List<TouchPoint>.from(localTouches),
+        _glow = glow, // <--- NEU: Initialisieren
         _link = link {
     // Register immediately upon creation.
     _register();
@@ -196,10 +204,23 @@ class RenderLiquidGlass extends RenderProxyBox {
   List<TouchPoint> _localTouches;
   List<TouchPoint> get localTouches => _localTouches;
   set localTouches(List<TouchPoint> value) {
-    // Deep comparison could be expensive, assuming immutable list replacement.
     if (listEquals(_localTouches, value)) return;
     _localTouches = List<TouchPoint>.from(value);
     _link.notifyShapeLayoutChanged(this);
+    markNeedsPaint();
+  }
+
+  // --- NEU: Glow Property ---
+  GlowStyle? _glow;
+  GlowStyle? get glow => _glow;
+  set glow(GlowStyle? value) {
+    if (_glow == value) return;
+    _glow = value;
+
+    // WICHTIG: Wir müssen dem Layer Bescheid geben, dass sich "Daten" geändert haben,
+    // damit er die Uniforms für dieses Shape neu in den Shader lädt.
+    _link.notifyShapeLayoutChanged(this);
+    // Wir müssen neu malen, damit der Effekt sichtbar wird.
     markNeedsPaint();
   }
 
@@ -257,9 +278,6 @@ class RenderLiquidGlass extends RenderProxyBox {
   }
 
   /// Called by the [RenderLiquidGlassLayer] to paint the child content.
-  ///
-  /// This occurs either before the glass effect (if [glassContainsChild] is true)
-  /// or after the glass effect (if false).
   void paintFromLayer(PaintingContext context, Offset offset) {
     // Standard RenderProxyBox painting of the child.
     super.paint(context, offset);
