@@ -1,7 +1,6 @@
 #ifndef LIQUID_GLASS_SHARED_GLSL
 #define LIQUID_GLASS_SHARED_GLSL 1
 
-// Configuration constants with default fallbacks.
 #ifndef TAU
 #define TAU 6.28318530718
 #endif
@@ -62,7 +61,6 @@
 #define GLOW_OWNER_FEATHER_PX 1.6
 #endif
 
-// Uniform accessor macros.
 #define u_dir_x        (uBlurHeader.x)
 #define u_dir_y        (uBlurHeader.y)
 #define u_sample_count (uBlurHeader.z)
@@ -74,46 +72,46 @@ struct RimMasks {
 };
 
 // Generates a pseudo-random float based on a 2D position.
-float _hash12(vec2 p) {
-    vec3 q = fract(vec3(p.xyx) * 0.1031);
+float _hash12(vec2 position) {
+    vec3 q = fract(vec3(position.xyx) * 0.1031);
     q += dot(q, q.yzx + 33.33);
     return fract((q.x + q.y) * q.z);
 }
 
-// NEU: Einfacher Hash für Jitter-Rauschen
-float _hashRefr(vec2 p) {
-    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+// Generates a high-frequency hash for refraction jitter.
+float _hashRefraction(vec2 position) {
+    return fract(sin(dot(position, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
-// Normalizes a vector, handling zero-length cases safely.
+// Normalizes a vector, handling zero-length cases to avoid NaN.
 vec2 _safeNormalize(vec2 v) {
-    float d = max(dot(v, v), LG_EPS);
-    return v * inversesqrt(d);
+    float lengthSquared = max(dot(v, v), LG_EPS);
+    return v * inversesqrt(lengthSquared);
 }
 
-// Converts pixel coordinates to UV coordinates.
-vec2 _uvFromPx(vec2 px, vec2 sizePx) {
-    vec2 uv = px / max(sizePx, vec2(1.0));
+// Converts pixel coordinates to UV coordinates, handling OpenGL target flipping.
+vec2 _uvFromPx(vec2 pixel, vec2 sizePixels) {
+    vec2 uv = pixel / max(sizePixels, vec2(1.0));
     #ifdef IMPELLER_TARGET_OPENGLES
     uv.y = 1.0 - uv.y;
     #endif
     return uv;
 }
 
-// Converts UV coordinates to pixel coordinates.
-vec2 _pxFromUv(vec2 uv, vec2 sizePx) {
+// Converts UV coordinates to pixel coordinates, handling OpenGL target flipping.
+vec2 _pxFromUv(vec2 uv, vec2 sizePixels) {
     #ifdef IMPELLER_TARGET_OPENGLES
     uv.y = 1.0 - uv.y;
     #endif
-    return uv * sizePx;
+    return uv * sizePixels;
 }
 
-// Samples a texture with standard clamping.
+// Samples a texture with standard clamping to [0, 1].
 vec4 _sampleTexture(sampler2D t, vec2 uv) {
     return texture(t, clamp(uv, vec2(0.0), vec2(1.0)));
 }
 
-// Simuliert Nearest-Neighbor Sampling (Pixel-Look)
+// Simulates Nearest-Neighbor sampling for pixelated aesthetic.
 vec4 _sampleNearest(sampler2D tex, vec2 uv, vec2 texSize) {
     vec2 pixel = uv * texSize;
     vec2 nearestPixel = floor(pixel) + 0.5;
@@ -121,22 +119,7 @@ vec4 _sampleNearest(sampler2D tex, vec2 uv, vec2 texSize) {
     return texture(tex, clamp(nearestUV, vec2(0.0), vec2(1.0)));
 }
 
-// NEU: Multi-Tap Jittered Blur für die Child-Texture
-vec4 _blurJitterRefraction(sampler2D tex, vec2 uv, float blurAmount, vec2 sizePx, vec2 seed) {
-    if (blurAmount <= 0.05) return _sampleNearest(tex, uv, uChildSize);
-    
-    vec2 px = 1.0 / sizePx;
-    float s = blurAmount * 0.7; 
-    
-    vec4 col = _sampleNearest(tex, uv + vec2(-s, -s) * px, uChildSize);
-    col     += _sampleNearest(tex, uv + vec2( s, -s) * px, uChildSize);
-    col     += _sampleNearest(tex, uv + vec2(-s,  s) * px, uChildSize);
-    col     += _sampleNearest(tex, uv + vec2( s,  s) * px, uChildSize);
-    
-    return col * 0.25;
-}
-
-// Applies texture wrapping modes (clamp, repeat, mirror).
+// Applies texture wrapping modes: 0=Clamp, 1=Repeat, 2=Mirror.
 vec2 _applyTileMode(vec2 uv, vec2 size, float mode) {
     if (mode < 0.5) {
         vec2 eps = 0.5 / size;
@@ -150,54 +133,66 @@ vec2 _applyTileMode(vec2 uv, vec2 size, float mode) {
     return uv;
 }
 
-// Determines if chromatic aberration should be applied based on blur direction.
-bool _shouldApplyCA() {
-    return (abs(u_dir_y) >= abs(u_dir_x));
-}
-
-// Decodes shape data from the uniform array.
-void _readShapeData(int idx, out float type, out vec2 center, out vec2 size, out float cornerRadius) {
-    int base = idx * 7;
-    type = uShapeData[base + 0];
-    center = vec2(uShapeData[base + 1], uShapeData[base + 2]);
-    size = vec2(uShapeData[base + 3], uShapeData[base + 4]);
-    cornerRadius = uShapeData[base + 5];
+// Decodes shape geometry data from the uniform array.
+void _readShapeData(int shapeIndex, out float type, out vec2 center, out vec2 size, out float cornerRadius) {
+    int baseIndex = shapeIndex * 7;
+    type = uShapeData[baseIndex + 0];
+    center = vec2(uShapeData[baseIndex + 1], uShapeData[baseIndex + 2]);
+    size = vec2(uShapeData[baseIndex + 3], uShapeData[baseIndex + 4]);
+    cornerRadius = uShapeData[baseIndex + 5];
 }
 
 // Computes the signed distance for a rounded rectangle.
-float _sdRoundedRect(vec2 p, vec2 c, vec2 size, float r) {
+float _sdRoundedRect(vec2 position, vec2 center, vec2 size, float radius) {
     vec2 halfSize = max(size * 0.5, vec2(0.0));
-    float rad = clamp(r, 0.0, min(halfSize.x, halfSize.y));
-    vec2 q = abs(p - c) - (halfSize - vec2(rad));
-    return length(max(q, 0.0)) - rad + min(max(q.x, q.y), 0.0);
+    float clampedRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(position - center) - (halfSize - vec2(clampedRadius));
+    return length(max(q, 0.0)) - clampedRadius + min(max(q.x, q.y), 0.0);
 }
 
 // Computes an approximate signed distance for an ellipse.
-float _sdEllipse(vec2 p, vec2 c, vec2 size) {
+float _sdEllipse(vec2 position, vec2 center, vec2 size) {
     vec2 ab = max(size * 0.5, vec2(1e-4));
-    vec2 d = (p - c) / ab;
+    vec2 d = (position - center) / ab;
     float k = length(d) - 1.0;
     return k * min(ab.x, ab.y);
 }
 
 // Computes the signed distance to a specific shape index.
-float _sdShapeAt(int idx, vec2 p) {
+float _sdShapeAt(int shapeIndex, vec2 position) {
     float type, radius;
     vec2 center, size;
-    _readShapeData(idx, type, center, size, radius);
+    _readShapeData(shapeIndex, type, center, size, radius);
     
     if (type == 2.0) {
-        return _sdEllipse(p, center, size);
+        return _sdEllipse(position, center, size);
     }
-    return _sdRoundedRect(p, center, size, radius);
+    return _sdRoundedRect(position, center, size, radius);
 }
 
-// Projects a point from SDF space to Screen Pixel space.
-vec2 _projectSdfToScreen(vec2 pSdf) {
-    mat4 invT = inverse(uTransform);
-    vec4 ps4 = invT * vec4(pSdf, 0.0, 1.0);
-    float w = max(ps4.w, 1e-6);
-    return ps4.xy / w;
+// Projects a point from SDF space to Screen Pixel space using the inverse transform.
+vec2 _projectSdfToScreen(vec2 positionSdf) {
+    mat4 inverseTransform = inverse(uTransform);
+    vec4 positionScreen = inverseTransform * vec4(positionSdf, 0.0, 1.0);
+    float w = max(positionScreen.w, 1e-6);
+    return positionScreen.xy / w;
+}
+
+// Applies a multi-tap jittered blur to the child texture to prevent aliasing.
+vec4 _blurJitterRefraction(sampler2D tex, vec2 uv, float blurAmount, vec2 sizePixels, vec2 seed) {
+    if (blurAmount <= 0.05) {
+        return _sampleNearest(tex, uv, uChildSize);
+    }
+    
+    vec2 pixelSize = 1.0 / sizePixels;
+    float spread = blurAmount * 0.7; 
+    
+    vec4 color = _sampleNearest(tex, uv + vec2(-spread, -spread) * pixelSize, uChildSize);
+    color += _sampleNearest(tex, uv + vec2( spread, -spread) * pixelSize, uChildSize);
+    color += _sampleNearest(tex, uv + vec2(-spread,  spread) * pixelSize, uChildSize);
+    color += _sampleNearest(tex, uv + vec2( spread,  spread) * pixelSize, uChildSize);
+    
+    return color * 0.25;
 }
 
 // Applies a 1D Gaussian blur based on uniform samples.
@@ -205,42 +200,125 @@ vec4 _applyGaussianBlur(sampler2D tex, vec2 baseUV) {
     vec2 pixel = vec2(1.0 / uSize.x, 1.0 / uSize.y);
     vec2 stepVec = vec2(u_dir_x * pixel.x, u_dir_y * pixel.y);
     
-    float nRaw = u_sample_count;
-    if (nRaw <= 0.5) {
+    float sampleCountRaw = u_sample_count;
+    if (sampleCountRaw <= 0.5) {
         vec2 eps = vec2(0.5 / uSize.x, 0.5 / uSize.y);
         return texture(tex, clamp(baseUV, eps, vec2(1.0) - eps));
     }
 
     vec4 sum = vec4(0.0);
-    float wSum = 0.0;
-    int nS = int(nRaw + 0.5);
+    float weightSum = 0.0;
+    int sampleCount = int(sampleCountRaw + 0.5);
 
     for (int i = 0; i < 50; ++i) {
-        if (i >= nS) break;
+        if (i >= sampleCount) break;
         
         float t = u_samples[i].x;
-        float w = u_samples[i].z;
+        float weight = u_samples[i].z;
         
-        if (w <= 1e-6) continue;
+        if (weight <= 1e-6) continue;
 
-        vec2 uvOff = baseUV + stepVec * t;
-        vec4 s;
+        vec2 offsetUV = baseUV + stepVec * t;
+        vec4 sampleColor;
         
-        if (u_tile_mode >= 2.5 && (any(lessThan(uvOff, vec2(0.0))) || any(greaterThan(uvOff, vec2(1.0))))) {
-            s = vec4(0.0);
+        if (u_tile_mode >= 2.5 && (any(lessThan(offsetUV, vec2(0.0))) || any(greaterThan(offsetUV, vec2(1.0))))) {
+            sampleColor = vec4(0.0);
         } else {
-            vec2 tiled = _applyTileMode(uvOff, uSize, u_tile_mode);
-            s = texture(tex, tiled);
+            vec2 tiledUV = _applyTileMode(offsetUV, uSize, u_tile_mode);
+            sampleColor = texture(tex, tiledUV);
         }
         
-        sum += w * s;
-        wSum += w;
+        sum += weight * sampleColor;
+        weightSum += weight;
     }
 
-    if (wSum > 1e-6) {
-        return sum / wSum;
+    if (weightSum > 1e-6) {
+        return sum / weightSum;
     }
     return texture(tex, baseUV);
+}
+
+// Approximates a Gaussian blur using a 9-tap kernel for glow effects.
+vec4 _blurApprox9(sampler2D tex, vec2 uv, float sigmaPixels, vec2 sizePixels) {
+    if (sigmaPixels <= 0.01) return _sampleTexture(tex, uv);
+    
+    vec2 px = 1.0 / sizePixels;
+    float spread = clamp(sigmaPixels, 0.0, 6.0);
+    float weightCenter = 0.227027;
+    float weightNear = 0.194594;
+    float weightFar = 0.121621;
+    
+    vec4 color = _sampleTexture(tex, uv) * weightCenter;
+    color += _sampleTexture(tex, uv + vec2( px.x,  0.0)) * weightNear;
+    color += _sampleTexture(tex, uv + vec2(-px.x,  0.0)) * weightNear;
+    color += _sampleTexture(tex, uv + vec2( 0.0,  px.y)) * weightNear;
+    color += _sampleTexture(tex, uv + vec2( 0.0, -px.y)) * weightNear;
+    color += _sampleTexture(tex, uv + vec2( px.x,  px.y)) * weightFar;
+    color += _sampleTexture(tex, uv + vec2(-px.x,  px.y)) * weightFar;
+    color += _sampleTexture(tex, uv + vec2( px.x, -px.y)) * weightFar;
+    color += _sampleTexture(tex, uv + vec2(-px.x, -px.y)) * weightFar;
+    
+    float t = clamp((spread - 1.0) / 5.0, 0.0, 1.0);
+    return mix(_sampleTexture(tex, uv), color, t);
+}
+
+// Samples texture with multi-tap anti-aliasing for chromatic aberration.
+vec4 _sampleAberrationAA(sampler2D tex, vec2 uvCenter, vec2 aberrationUV, vec2 sizePixels) {
+    float lengthPixels = length(aberrationUV * sizePixels);
+    if (lengthPixels < 1e-4) {
+        return _sampleTexture(tex, uvCenter);
+    }
+    
+    vec2 px = 1.0 / sizePixels;
+    vec2 dir = normalize(aberrationUV + vec2(1e-6));
+    float radiusPixels = float(LG_CA_AA_RADIUS_PX);
+    float strength = clamp(float(LG_CA_AA_STRENGTH), 0.0, 1.0);
+    
+    vec2 offsetUV = dir * radiusPixels * px;
+    
+    vec4 c0 = _sampleTexture(tex, uvCenter);
+    vec4 c1 = _sampleTexture(tex, uvCenter + offsetUV);
+    vec4 c2 = _sampleTexture(tex, uvCenter - offsetUV);
+    
+    #if LG_CA_AA_TAPS == 2
+    vec4 average = 0.5 * (c1 + c2);
+    #else
+    vec4 average = (c0 + c1 + c2) / 3.0;
+    #endif
+    
+    return mix(c0, average, strength);
+}
+
+// Performs Rotated Grid Super Sampling (4 taps) along a direction.
+vec4 _sampleRGSS4(sampler2D tex, vec2 uv, vec2 px, vec2 dir, float radiusPixels, float gain) {
+    vec2 ortho = vec2(-dir.y, dir.x);
+    vec2 o0 = vec2(0.5, 0.5);
+    vec2 o1 = vec2(-0.5, 0.5);
+    vec2 o2 = vec2(0.5, -0.5);
+    vec2 o3 = vec2(-0.5, -0.5);
+    
+    vec2 a0 = (dir * (o0.x * gain) + ortho * o0.y) * radiusPixels;
+    vec2 a1 = (dir * (o1.x * gain) + ortho * o1.y) * radiusPixels;
+    vec2 a2 = (dir * (o2.x * gain) + ortho * o2.y) * radiusPixels;
+    vec2 a3 = (dir * (o3.x * gain) + ortho * o3.y) * radiusPixels;
+    
+    vec4 c0 = _applyGaussianBlur(tex, uv + a0 * px);
+    vec4 c1 = _applyGaussianBlur(tex, uv + a1 * px);
+    vec4 c2 = _applyGaussianBlur(tex, uv + a2 * px);
+    vec4 c3 = _applyGaussianBlur(tex, uv + a3 * px);
+    
+    return (c0 + c1 + c2 + c3) * 0.25;
+}
+
+// Applies anti-aliasing to refracted samples using RGSS4.
+vec4 _sampleRefractionAA(sampler2D tex, vec2 uv, vec2 sizePixels, vec2 directionUV, float radiusPixels, float strength, float gain) {
+    vec2 px = vec2(1.0 / sizePixels.x, 1.0 / sizePixels.y);
+    vec2 dir = normalize(directionUV + vec2(1e-6));
+    
+    vec4 average = _sampleRGSS4(tex, uv, px, dir, radiusPixels, gain);
+    vec4 base = _applyGaussianBlur(tex, uv);
+    
+    return mix(base, average, clamp(strength, 0.0, 1.0));
 }
 
 // Calculates a highlight color based on background luminance and saturation.
@@ -270,342 +348,36 @@ vec3 _computeAdaptiveHighlight(vec3 backgroundColor, float targetBrightness) {
 }
 
 // Calculates the virtual height of the liquid at a given signed distance.
-float _calculateLiquidHeight(float sd, float thickness) {
-    if (sd >= 0.0 || thickness <= 0.0) return 0.0;
-    if (sd < -thickness) return thickness;
+float _calculateLiquidHeight(float signedDistance, float thickness) {
+    if (signedDistance >= 0.0 || thickness <= 0.0) return 0.0;
+    if (signedDistance < -thickness) return thickness;
     
-    float x = thickness + sd;
+    float x = thickness + signedDistance;
     return sqrt(max(0.0, thickness * thickness - x * x));
 }
 
-// Generates masks for rim lighting logic.
-RimMasks _calculateRimMasks(float sd, float rimWidthPx, float rimSharpness) {
-    vec2 g = vec2(dFdx(sd), dFdy(sd));
-    float gMag = max(length(g), 1e-6);
-    float wSdf = max(rimWidthPx, 0.0) * gMag;
+// Generates masks for rim lighting logic based on signed distance derivatives.
+RimMasks _calculateRimMasks(float signedDistance, float rimWidthPixels, float rimSharpness) {
+    vec2 gradient = vec2(dFdx(signedDistance), dFdy(signedDistance));
+    float gradientMagnitude = max(length(gradient), 1e-6);
+    float widthSdf = max(rimWidthPixels, 0.0) * gradientMagnitude;
     
-    float edge01 = step(sd, 0.0) * smoothstep(-wSdf, 0.0, sd);
+    float edge01 = step(signedDistance, 0.0) * smoothstep(-widthSdf, 0.0, signedDistance);
     float gamma = max(rimSharpness, 1e-3);
     
     float band = pow(edge01, 1.0 / gamma);
-    float coreExp = mix(3.0, 1.1, clamp(rimWidthPx / 64.0, 0.0, 1.0));
-    float core = pow(edge01, coreExp / gamma);
+    float coreExponent = mix(3.0, 1.1, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
+    float core = pow(edge01, coreExponent / gamma);
     
-    RimMasks m;
-    m.band = band;
-    m.core = core;
-    return m;
+    RimMasks masks;
+    masks.band = band;
+    masks.core = core;
+    return masks;
 }
 
 // Computes Fresnel reflectance using Schlick's approximation.
 float _fresnelSchlick(float cosTheta, float f0) {
     return f0 + (1.0 - f0) * pow(1.0 - cosTheta, 5.0);
-}
-
-// Applies a white fringe effect to the edges of the shape.
-vec3 _applyRimHighlight(vec3 baseColor, vec3 normal, float sd, float rimWidthPx, float rimSharpness) {
-    RimMasks rm = _calculateRimMasks(sd, rimWidthPx, rimSharpness);
-    float cosNv = clamp(abs(normal.z), 0.0, 1.0);
-    float f = _fresnelSchlick(cosNv, 0.04);
-    
-    float bandGain = mix(0.25, 0.65, clamp(rimWidthPx / 64.0, 0.0, 1.0));
-    float coreGain = mix(0.15, 0.40, clamp(rimWidthPx / 64.0, 0.0, 1.0));
-    
-    float amt = rm.band * bandGain + rm.core * coreGain;
-    amt *= f;
-    
-    return mix(baseColor, vec3(1.0), clamp(amt, 0.0, 1.0));
-}
-
-// Computes anti-aliased coverage for the shape edge.
-float _computeCoverageAA(float sd) {
-    float w = fwidth(sd);
-    return smoothstep(-w, w, -sd);
-}
-
-// Samples texture with multi-tap anti-aliasing for chromatic aberration.
-vec4 _sampleAberrationAA(sampler2D tex, vec2 uvCenter, vec2 aberrUV, vec2 sizePx) {
-    float caLenPx = length(aberrUV * sizePx);
-    if (caLenPx < 1e-4) {
-        return _sampleTexture(tex, uvCenter);
-    }
-    
-    vec2 px = 1.0 / sizePx;
-    vec2 dir = normalize(aberrUV + vec2(1e-6));
-    float radiusPx = float(LG_CA_AA_RADIUS_PX);
-    float strength = clamp(float(LG_CA_AA_STRENGTH), 0.0, 1.0);
-    
-    vec2 offPx = dir * radiusPx;
-    vec2 offUV = offPx * px;
-    
-    vec4 c0 = _sampleTexture(tex, uvCenter);
-    vec4 c1 = _sampleTexture(tex, uvCenter + offUV);
-    vec4 c2 = _sampleTexture(tex, uvCenter - offUV);
-    
-    #if LG_CA_AA_TAPS == 2
-    vec4 avg = 0.5 * (c1 + c2);
-    #else
-    vec4 avg = (c0 + c1 + c2) / 3.0;
-    #endif
-    
-    return mix(c0, avg, strength);
-}
-
-// Performs Rotated Grid Super Sampling (4 taps).
-vec4 _sampleRGSS4(sampler2D tex, vec2 uv, vec2 px, vec2 dir, float radiusPx, float alongGain) {
-    vec2 ortho = vec2(-dir.y, dir.x);
-    vec2 o0 = vec2(0.5, 0.5);
-    vec2 o1 = vec2(-0.5, 0.5);
-    vec2 o2 = vec2(0.5, -0.5);
-    vec2 o3 = vec2(-0.5, -0.5);
-    
-    vec2 a0 = (dir * (o0.x * alongGain) + ortho * o0.y) * radiusPx;
-    vec2 a1 = (dir * (o1.x * alongGain) + ortho * o1.y) * radiusPx;
-    vec2 a2 = (dir * (o2.x * alongGain) + ortho * o2.y) * radiusPx;
-    vec2 a3 = (dir * (o3.x * alongGain) + ortho * o3.y) * radiusPx;
-    
-    vec4 c0 = _applyGaussianBlur(tex, uv + a0 * px);
-    vec4 c1 = _applyGaussianBlur(tex, uv + a1 * px);
-    vec4 c2 = _applyGaussianBlur(tex, uv + a2 * px);
-    vec4 c3 = _applyGaussianBlur(tex, uv + a3 * px);
-    
-    return (c0 + c1 + c2 + c3) * 0.25;
-}
-
-// Applies anti-aliasing to refracted samples.
-vec4 _sampleRefractionAA(sampler2D tex, vec2 uv, vec2 sizePx, vec2 dirUV, float radiusPx, float strength, float alongGain) {
-    vec2 px = vec2(1.0 / sizePx.x, 1.0 / sizePx.y);
-    vec2 dir = normalize(dirUV + vec2(1e-6));
-    
-    vec4 avg = _sampleRGSS4(tex, uv, px, dir, radiusPx, alongGain);
-    vec4 base = _applyGaussianBlur(tex, uv);
-    
-    return mix(base, avg, clamp(strength, 0.0, 1.0));
-}
-
-// -----------------------------------------------------------------------------
-// Helper for Hard Light Blending
-// -----------------------------------------------------------------------------
-vec3 _blendHardLight(vec3 base, vec3 blend) {
-    vec3 t1 = 2.0 * base * blend;
-    vec3 t2 = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
-    vec3 selection = step(0.5, blend);
-    return mix(t1, t2, selection);
-}
-
-// MODIFIZIERT: Hybrid-Ansatz -> Original-Optik verstärkt durch Refraction-Stärke
-vec3 _resolveDispersion(
-    vec2 uvBase,
-    vec2 childUVBase,
-    vec2 refractionDisplacement,
-    vec2 sizePx,
-    sampler2D backgroundTexture,
-    sampler2D childTexture,
-    int currentShapeIdx,
-    float ca,
-    vec4 baseColor
-) {
-    float type, radius;
-    vec2 cSdf, szSdf;
-    _readShapeData(currentShapeIdx, type, cSdf, szSdf, radius);
-    
-    vec2 centerPx = _projectSdfToScreen(cSdf);
-    vec2 centerUV = _uvFromPx(centerPx, sizePx);
-    
-    vec2 col0 = uTransform[0].xy;
-    vec2 col1 = uTransform[1].xy;
-    float scaleX = max(length(col0), 1e-6);
-    float scaleY = max(length(col1), 1e-6);
-    
-    float widthScreen = szSdf.x / scaleX;
-    float heightScreen = szSdf.y / scaleY;
-    float minDimScreen = min(widthScreen, heightScreen);
-    
-    vec2 distUV = uvBase - centerUV;
-    float dispersion = ca * AGSL_DISPERSION_SCALE;
-    vec2 minDimOverSize = vec2(minDimScreen / sizePx.x, minDimScreen / sizePx.y);
-    vec2 dist3 = distUV * distUV * distUV;
-    
-    // --- HYBRID LOGIK HIER ---
-    // 1. Wir nutzen 'dist3' (Entfernung zur Mitte) für die Form/Richtung (Lens Look).
-    // 2. Wir messen 'refractionDisplacement' für die Verzerrungs-Intensität.
-    // 3. Wir multiplizieren beides: Die CA ist stark, wo es "außen" ist UND "verzerrt".
-    
-    float distortMag = length(refractionDisplacement);
-    // Faktor 40.0 ist ein Gain, da Displacement in UV-Space sehr klein ist (z.B. 0.005)
-    float boost = 1.0 + (distortMag * 100.0);
-    
-    // Original Formel * Boost
-    vec2 aberrUV = (dispersion * dist3 * minDimOverSize) * boost;
-    
-    vec2 uvR = uvBase - aberrUV;
-    vec2 uvG = uvBase;
-    vec2 uvB = uvBase + aberrUV;
-    
-    vec2 pxR = _pxFromUv(uvR, sizePx);
-    vec2 pxB = _pxFromUv(uvB, sizePx);
-    
-    vec2 pR = (uTransform * vec4(pxR, 0.0, 1.0)).xy;
-    vec2 pB = (uTransform * vec4(pxB, 0.0, 1.0)).xy;
-    
-    bool validR = (_sdShapeAt(currentShapeIdx, pR) <= 0.0);
-    bool validB = (_sdShapeAt(currentShapeIdx, pB) <= 0.0);
-    
-    vec4 sGbg = _sampleAberrationAA(backgroundTexture, uvG, aberrUV, sizePx);
-    vec4 sRbg = validR ? _sampleAberrationAA(backgroundTexture, uvR, aberrUV, sizePx) : sGbg;
-    vec4 sBbg = validB ? _sampleAberrationAA(backgroundTexture, uvB, aberrUV, sizePx) : sGbg;
-    
-    vec4 sGch = _sampleTexture(childTexture, childUVBase + refractionDisplacement);
-    vec4 sRch = _sampleTexture(childTexture, childUVBase + refractionDisplacement - aberrUV);
-    vec4 sBch = _sampleTexture(childTexture, childUVBase + refractionDisplacement + aberrUV);
-    
-    if (!validR) sRch = sGch;
-    if (!validB) sBch = sGch;
-    
-    // Hard Light Blending
-    vec3 cR_rgb = (sRch.a > 0.001) ? sRch.rgb / sRch.a : sRch.rgb;
-    vec3 cG_rgb = (sGch.a > 0.001) ? sGch.rgb / sGch.a : sGch.rgb;
-    vec3 cB_rgb = (sBch.a > 0.001) ? sBch.rgb / sBch.a : sBch.rgb;
-
-    vec3 hl_R = _blendHardLight(sRbg.rgb, cR_rgb);
-    float r = mix(sRbg.r, hl_R.r, sRch.a);
-
-    vec3 hl_G = _blendHardLight(sGbg.rgb, cG_rgb);
-    float g = mix(sGbg.g, hl_G.g, sGch.a);
-
-    vec3 hl_B = _blendHardLight(sBbg.rgb, cB_rgb);
-    float b = mix(sBbg.b, hl_B.b, sBch.a);
-    
-    vec3 spectralNew = vec3(r, g, b);
-    vec3 diff = spectralNew - baseColor.rgb;
-    diff *= float(LG_CA_LIGHTNESS_BOOST) * float(LG_CA_NEW_GAIN);
-    
-    float lumNew = dot(diff, vec3(0.299, 0.587, 0.114));
-    return mix(vec3(lumNew), diff, float(LG_CA_SATURATION_BOOST));
-}
-
-// Calculates refraction, including anti-aliasing and chromatic aberration.
-vec4 _calculateRefractionLayer(
-    vec2 screenUV, vec3 normal, float sd, float height, float thickness,
-    float refractiveIndex, float chromaticAberration,
-    vec2 sizePx, sampler2D backgroundTexture,
-    sampler2D childTexture,
-    vec2 childUVBase,
-    out vec2 refractionDisplacement,
-    float rimWidthPx, float rimSharpness,
-    vec2 lightDirection, float lightIntensity,
-    int currentShapeIdx
-) {
-    vec3 incident = vec3(0.0, 0.0, -1.0);
-    float n = max(refractiveIndex, 1.0001);
-    vec3 refr = refract(incident, normal, 1.0 / n);
-    
-    float baseH = thickness * 8.0;
-    float refrL = (height + baseH) / max(0.001, abs(refr.z));
-    
-    RimMasks rm = _calculateRimMasks(sd, rimWidthPx, rimSharpness);
-    vec2 l = lightDirection;
-    vec2 nXy = _safeNormalize(normal.xy);
-    float facing = abs(dot(nXy, l));
-    float lightMask = pow(facing, 0.7) * clamp(lightIntensity, 0.0, 1.0);
-    float boost = 1.0 + 0.4 * (rm.band * lightMask);
-    
-    vec2 dispPx = refr.xy * (refrL * boost);
-    refractionDisplacement = dispPx / sizePx;
-    
-    vec2 uvBase = screenUV + refractionDisplacement;
-    vec2 uvChild = childUVBase + refractionDisplacement;
-
-    // Adaptiver Blur Radius für die Child-Texture
-    float stretch = length(fwidth(dispPx));
-    float blurRadius = clamp(stretch * 0.45, 0.0, 6.0);
-
-    // HINTERGRUND: Gaussian Blur (wie gewünscht)
-    vec4 gS = _applyGaussianBlur(backgroundTexture, uvBase);
-    
-    // CHILD: Jitter Blur (gegen Pixelbildung an Kanten)
-    vec4 cS = _blurJitterRefraction(childTexture, uvChild, blurRadius, sizePx, uvChild);
-    
-    // --- Hard Light Blending ---
-    vec3 childRGB = (cS.a > 0.001) ? cS.rgb / cS.a : cS.rgb;
-    vec3 blended = _blendHardLight(gS.rgb, childRGB);
-    gS.rgb = mix(gS.rgb, blended, cS.a);
-    
-    float ca = max(chromaticAberration, 0.0);
-    
-    if (ca <= 1e-4) return gS;
-
-    vec2 dirRefUV = dispPx / sizePx;
-    vec4 baseAA = _sampleRefractionAA(
-        backgroundTexture, uvBase, sizePx, dirRefUV,
-        float(LG_REFRACT_AA_RADIUS_PX),
-        float(LG_REFRACT_AA_STRENGTH),
-        1.4 
-    );
-    
-    vec3 blendedAA = _blendHardLight(baseAA.rgb, childRGB);
-    gS = vec4(mix(baseAA.rgb, blendedAA, cS.a), baseAA.a);
-
-    vec3 diffNew = _resolveDispersion(
-        uvBase, childUVBase, refractionDisplacement, sizePx,
-        backgroundTexture, childTexture, currentShapeIdx, ca, gS
-    );
-
-    float caMixNew = clamp(float(LG_CA_OPACITY), 0.0, 1.0);
-    float edgeAA = smoothstep(-float(LG_CA_EDGE_FEATHER_PX) * fwidth(sd), 0.0, -sd);
-    caMixNew *= edgeAA;
-    
-    vec3 finalRGB = clamp(gS.rgb + diffNew * caMixNew, 0.0, 1.0);
-    return vec4(finalRGB, gS.a);
-}
-
-// Calculates lighting based on normal, rim effects, and ambient light.
-vec3 _calculateTotalLighting(
-    vec2 uv, vec3 normal, float sd, float thickness, float height,
-    vec2 lightDirection, float lightIntensity, float ambientStrength,
-    vec3 backgroundColor, float rimWidthPx, float rimSharpness
-) {
-    float thicknessFactor = smoothstep(5.0, 7.0, thickness);
-    if (thicknessFactor < 0.01 || lightIntensity < 0.01) return vec3(0.0);
-    
-    RimMasks rm = _calculateRimMasks(sd, rimWidthPx, rimSharpness);
-    vec2 l = lightDirection;
-    vec2 nXy = _safeNormalize(normal.xy);
-    
-    float facing = abs(dot(nXy, l));
-    float lightMask = pow(facing, 0.7);
-    float rimMask = rm.band * lightMask;
-    
-    if (rimMask < 1e-3) return vec3(0.0);
-    
-    float mainL = max(0.0, dot(nXy, l));
-    float oppL = max(0.0, dot(nXy, -l));
-    float total = mainL + oppL * 0.8;
-    
-    vec3 hl = _computeAdaptiveHighlight(backgroundColor, 0.7);
-    vec3 directionalRim = hl * (total * total) * lightIntensity * 2.0;
-    vec3 ambientRim = _computeAdaptiveHighlight(backgroundColor, 0.4) * ambientStrength;
-    
-    vec3 lighting = (directionalRim + ambientRim);
-    float whitePull = 0.55;
-    float coreGain = mix(0.16, 0.36, clamp(rimWidthPx / 64.0, 0.0, 1.0));
-    
-    vec3 towardWhite = mix(lighting, vec3(1.0), whitePull);
-    lighting = mix(lighting, towardWhite, rm.core * coreGain);
-    
-    return lighting * rimMask * thicknessFactor;
-}
-
-// Applies saturation and lightness adjustments to a color.
-vec3 _adjustColorBalance(vec3 color, float saturation, float lightness) {
-    float luminance = dot(color, vec3(0.299, 0.587, 0.114));
-    vec3 saturatedColor = mix(vec3(luminance), color, saturation);
-    
-    vec3 adjustedColor = (lightness > 1.0)
-        ? mix(saturatedColor, vec3(1.0), lightness - 1.0)
-        : saturatedColor * lightness;
-        
-    return clamp(adjustedColor, 0.0, 1.0);
 }
 
 // Blends the liquid color with the glass tint.
@@ -629,58 +401,295 @@ vec4 _blendGlassTint(vec4 liquidColor, vec4 glassColor) {
     return finalColor;
 }
 
+// Applies saturation and lightness adjustments to a color.
+vec3 _adjustColorBalance(vec3 color, float saturation, float lightness) {
+    float luminance = dot(color, vec3(0.299, 0.587, 0.114));
+    vec3 saturatedColor = mix(vec3(luminance), color, saturation);
+    
+    vec3 adjustedColor = (lightness > 1.0)
+        ? mix(saturatedColor, vec3(1.0), lightness - 1.0)
+        : saturatedColor * lightness;
+        
+    return clamp(adjustedColor, 0.0, 1.0);
+}
+
+// Applies a white fringe effect to the edges of the shape, adjusting for saturation and lightness.
+vec3 _applyRimHighlight(
+    vec3 baseColor, vec3 normal, float signedDistance,
+    float rimWidthPixels, float rimSharpness,
+    float saturation, float lightness, vec4 glassColor
+) {
+    RimMasks masks = _calculateRimMasks(signedDistance, rimWidthPixels, rimSharpness);
+    float cosNv = clamp(abs(normal.z), 0.0, 1.0);
+    float fresnel = _fresnelSchlick(cosNv, 0.04);
+    
+    float bandGain = mix(0.25, 0.65, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
+    float coreGain = mix(0.15, 0.40, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
+    
+    float amount = masks.band * bandGain + masks.core * coreGain;
+    amount *= fresnel;
+    
+    vec4 rimColor = _blendGlassTint(vec4(1.0), glassColor);
+    rimColor.rgb = _adjustColorBalance(rimColor.rgb, saturation, lightness);
+    
+    return mix(baseColor, rimColor.rgb, clamp(amount, 0.0, 1.0));
+}
+
+// Computes anti-aliased coverage for the shape edge.
+float _computeCoverageAA(float signedDistance) {
+    float width = fwidth(signedDistance);
+    return smoothstep(-width, width, -signedDistance);
+}
+
+// Blends two colors using the Hard Light blend mode.
+vec3 _blendHardLight(vec3 base, vec3 blend) {
+    vec3 t1 = 2.0 * base * blend;
+    vec3 t2 = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
+    vec3 selection = step(0.5, blend);
+    return mix(t1, t2, selection);
+}
+
+// Resolves chromatic aberration using a hybrid approach of background and child texture sampling.
+vec3 _resolveDispersion(
+    vec2 uvBase,
+    vec2 childUVBase,
+    vec2 refractionDisplacement,
+    vec2 sizePixels,
+    sampler2D backgroundTexture,
+    sampler2D childTexture,
+    int shapeIndex,
+    float aberrationStrength,
+    vec4 baseColor,
+    float saturation,
+    float lightness,
+    vec4 glassColor
+) {
+    float type, radius;
+    vec2 centerSdf, sizeSdf;
+    _readShapeData(shapeIndex, type, centerSdf, sizeSdf, radius);
+    
+    vec2 centerPx = _projectSdfToScreen(centerSdf);
+    vec2 centerUV = _uvFromPx(centerPx, sizePixels);
+    
+    vec2 col0 = uTransform[0].xy;
+    vec2 col1 = uTransform[1].xy;
+    float scaleX = max(length(col0), 1e-6);
+    float scaleY = max(length(col1), 1e-6);
+    
+    float widthScreen = sizeSdf.x / scaleX;
+    float heightScreen = sizeSdf.y / scaleY;
+    float minDimensionScreen = min(widthScreen, heightScreen);
+    
+    vec2 distUV = uvBase - centerUV;
+    float dispersion = aberrationStrength * AGSL_DISPERSION_SCALE;
+    vec2 minDimOverSize = vec2(minDimensionScreen / sizePixels.x, minDimensionScreen / sizePixels.y);
+    vec2 distCubed = distUV * distUV * distUV;
+    
+    float distortMagnitude = length(refractionDisplacement);
+    float boost = 1.0 + (distortMagnitude * 100.0);
+    vec2 aberrationUV = (dispersion * distCubed * minDimOverSize) * boost;
+    
+    vec2 uvRed = uvBase - aberrationUV;
+    vec2 uvGreen = uvBase;
+    vec2 uvBlue = uvBase + aberrationUV;
+    
+    vec2 pxRed = _pxFromUv(uvRed, sizePixels);
+    vec2 pxBlue = _pxFromUv(uvBlue, sizePixels);
+    
+    vec2 pointRed = (uTransform * vec4(pxRed, 0.0, 1.0)).xy;
+    vec2 pointBlue = (uTransform * vec4(pxBlue, 0.0, 1.0)).xy;
+    
+    bool validRed = (_sdShapeAt(shapeIndex, pointRed) <= 0.0);
+    bool validBlue = (_sdShapeAt(shapeIndex, pointBlue) <= 0.0);
+    
+    vec4 sampleGreenBg = _sampleAberrationAA(backgroundTexture, uvGreen, aberrationUV, sizePixels);
+    vec4 sampleRedBg = validRed ? _sampleAberrationAA(backgroundTexture, uvRed, aberrationUV, sizePixels) : sampleGreenBg;
+    vec4 sampleBlueBg = validBlue ? _sampleAberrationAA(backgroundTexture, uvBlue, aberrationUV, sizePixels) : sampleGreenBg;
+
+    sampleGreenBg = _blendGlassTint(sampleGreenBg, glassColor);
+    sampleGreenBg.rgb = _adjustColorBalance(sampleGreenBg.rgb, saturation, lightness);
+    sampleRedBg = _blendGlassTint(sampleRedBg, glassColor);
+    sampleRedBg.rgb = _adjustColorBalance(sampleRedBg.rgb, saturation, lightness);
+    sampleBlueBg = _blendGlassTint(sampleBlueBg, glassColor);
+    sampleBlueBg.rgb = _adjustColorBalance(sampleBlueBg.rgb, saturation, lightness);
+    
+    vec4 sampleGreenChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement);
+    vec4 sampleRedChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement - aberrationUV);
+    vec4 sampleBlueChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement + aberrationUV);
+    
+    if (!validRed) sampleRedChild = sampleGreenChild;
+    if (!validBlue) sampleBlueChild = sampleGreenChild;
+    
+    vec3 colorRed = (sampleRedChild.a > 0.001) ? sampleRedChild.rgb / sampleRedChild.a : sampleRedChild.rgb;
+    vec3 colorGreen = (sampleGreenChild.a > 0.001) ? sampleGreenChild.rgb / sampleGreenChild.a : sampleGreenChild.rgb;
+    vec3 colorBlue = (sampleBlueChild.a > 0.001) ? sampleBlueChild.rgb / sampleBlueChild.a : sampleBlueChild.rgb;
+
+    vec3 hardLightRed = _blendHardLight(sampleRedBg.rgb, colorRed);
+    float redComponent = mix(sampleRedBg.r, hardLightRed.r, sampleRedChild.a);
+
+    vec3 hardLightGreen = _blendHardLight(sampleGreenBg.rgb, colorGreen);
+    float greenComponent = mix(sampleGreenBg.g, hardLightGreen.g, sampleGreenChild.a);
+
+    vec3 hardLightBlue = _blendHardLight(sampleBlueBg.rgb, colorBlue);
+    float blueComponent = mix(sampleBlueBg.b, hardLightBlue.b, sampleBlueChild.a);
+    
+    vec3 spectralNew = vec3(redComponent, greenComponent, blueComponent);
+    vec3 diff = spectralNew - baseColor.rgb;
+    diff *= float(LG_CA_LIGHTNESS_BOOST) * float(LG_CA_NEW_GAIN);
+    
+    float luminanceNew = dot(diff, vec3(0.299, 0.587, 0.114));
+    return mix(vec3(luminanceNew), diff, float(LG_CA_SATURATION_BOOST));
+}
+
+// Calculates refraction, including anti-aliasing and chromatic aberration.
+vec4 _calculateRefractionLayer(
+    vec2 screenUV, vec3 normal, float signedDistance, float height, float thickness,
+    float refractiveIndex, float chromaticAberration,
+    vec2 sizePixels, sampler2D backgroundTexture,
+    sampler2D childTexture,
+    vec2 childUVBase,
+    out vec2 outRefractionDisplacement,
+    out vec4 outRawTexture,
+    float rimWidthPixels, float rimSharpness,
+    vec2 lightDirection, float lightIntensity,
+    int shapeIndex,
+    float saturation,
+    float lightness,
+    vec4 glassColor, vec3 lighting
+) {
+    vec3 incident = vec3(0.0, 0.0, -1.0);
+    float n = max(refractiveIndex, 1.0001);
+    vec3 refractVec = refract(incident, normal, 1.0 / n);
+    
+    float baseHeight = thickness * 8.0;
+    float refractLength = (height + baseHeight) / max(0.001, abs(refractVec.z));
+    
+    RimMasks masks = _calculateRimMasks(signedDistance, rimWidthPixels, rimSharpness);
+    vec2 nXy = _safeNormalize(normal.xy);
+    float facing = abs(dot(nXy, lightDirection));
+    float lightMask = pow(facing, 0.7) * clamp(lightIntensity, 0.0, 1.0);
+    float boost = 1.0 + 0.4 * (masks.band * lightMask);
+    
+    vec2 displacementPixels = refractVec.xy * (refractLength * boost);
+    outRefractionDisplacement = displacementPixels / sizePixels;
+    
+    vec2 uvBase = screenUV + outRefractionDisplacement;
+    vec2 uvChild = childUVBase + outRefractionDisplacement;
+
+    float stretch = length(fwidth(displacementPixels));
+    float blurRadius = clamp(stretch * 0.45, 0.0, 6.0);
+
+    vec4 backgroundSample = _applyGaussianBlur(backgroundTexture, uvBase);
+    
+    outRawTexture = backgroundSample;
+
+    backgroundSample = _blendGlassTint(backgroundSample, glassColor);
+    backgroundSample.rgb += lighting;
+    backgroundSample.rgb = _adjustColorBalance(backgroundSample.rgb, saturation, lightness);
+    
+    vec4 childSample = _blurJitterRefraction(childTexture, uvChild, blurRadius, sizePixels, uvChild);
+    
+    vec3 childRGB = (childSample.a > 0.001) ? childSample.rgb / childSample.a : childSample.rgb;
+    vec3 blended = _blendHardLight(backgroundSample.rgb, childRGB);
+    
+    backgroundSample.rgb = mix(backgroundSample.rgb, blended, childSample.a);
+    
+    float ca = max(chromaticAberration, 0.0);
+    if (ca <= 1e-4) return backgroundSample;
+
+    vec2 dirRefUV = displacementPixels / sizePixels;
+    vec4 baseAA = _sampleRefractionAA(
+        backgroundTexture, uvBase, sizePixels, dirRefUV,
+        float(LG_REFRACT_AA_RADIUS_PX),
+        float(LG_REFRACT_AA_STRENGTH),
+        1.4 
+    );
+    
+    baseAA = _blendGlassTint(baseAA, glassColor);
+    baseAA.rgb += lighting;
+    baseAA.rgb = _adjustColorBalance(baseAA.rgb, saturation, lightness);
+    
+    vec3 blendedAA = _blendHardLight(baseAA.rgb, childRGB);
+    backgroundSample = vec4(mix(baseAA.rgb, blendedAA, childSample.a), baseAA.a);
+
+    vec3 diffNew = _resolveDispersion(
+        uvBase, childUVBase, outRefractionDisplacement, sizePixels,
+        backgroundTexture, childTexture, shapeIndex, ca, backgroundSample,
+        saturation, lightness, glassColor
+    );
+
+    float caMixNew = clamp(float(LG_CA_OPACITY), 0.0, 1.0);
+    float edgeAA = smoothstep(-float(LG_CA_EDGE_FEATHER_PX) * fwidth(signedDistance), 0.0, -signedDistance);
+    caMixNew *= edgeAA;
+    
+    vec3 finalRGB = clamp(backgroundSample.rgb + diffNew * caMixNew, 0.0, 1.0);
+    return vec4(finalRGB, backgroundSample.a);
+}
+
+// Calculates total lighting based on normal, rim effects, and ambient light.
+vec3 _calculateTotalLighting(
+    vec2 uv, vec3 normal, float signedDistance, float thickness, float height,
+    vec2 lightDirection, float lightIntensity, float ambientStrength,
+    vec3 backgroundColor, float rimWidthPixels, float rimSharpness
+) {
+    float thicknessFactor = smoothstep(5.0, 7.0, thickness);
+    if (thicknessFactor < 0.01 || lightIntensity < 0.01) return vec3(0.0);
+    
+    RimMasks masks = _calculateRimMasks(signedDistance, rimWidthPixels, rimSharpness);
+    vec2 nXy = _safeNormalize(normal.xy);
+    
+    float facing = abs(dot(nXy, lightDirection));
+    float lightMask = pow(facing, 0.7);
+    float rimMask = masks.band * lightMask;
+    
+    if (rimMask < 1e-3) return vec3(0.0);
+    
+    float mainLight = max(0.0, dot(nXy, lightDirection));
+    float oppositeLight = max(0.0, dot(nXy, -lightDirection));
+    float totalLight = mainLight + oppositeLight * 0.8;
+    
+    vec3 highlight = _computeAdaptiveHighlight(backgroundColor, 0.7);
+    vec3 directionalRim = highlight * (totalLight * totalLight) * lightIntensity * 2.0;
+    vec3 ambientRim = _computeAdaptiveHighlight(backgroundColor, 0.4) * ambientStrength;
+    
+    vec3 lighting = (directionalRim + ambientRim);
+    float whitePull = 0.55;
+    float coreGain = mix(0.16, 0.36, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
+    
+    vec3 towardWhite = mix(lighting, vec3(1.0), whitePull);
+    lighting = mix(lighting, towardWhite, masks.core * coreGain);
+    
+    return lighting * rimMask * thicknessFactor;
+}
+
 // Computes the mask for touch-based glow interactions.
-float _computeTouchGlowMask(vec2 pPx, vec2 pSdf, float insideOnly, float sdUnion, int currentShapeIdx) {
-    float n = uTouchCount_f;
-    if (n <= 0.5 || currentShapeIdx < 0) return 0.0;
+float _computeTouchGlowMask(vec2 positionPixels, vec2 positionSdf, float insideOnly, float sdUnion, int shapeIndex) {
+    float count = uTouchCount_f;
+    if (count <= 0.5 || shapeIndex < 0) return 0.0;
     
     float outMask = 0.0;
     for (int i = 0; i < 8; ++i) {
-        if (i >= int(n)) break;
+        if (i >= int(count)) break;
         
         int owner = int(floor(uTouchOwners[i] + 0.5));
-        int shapeIdx = (owner >= 0) ? owner : currentShapeIdx;
+        int targetShape = (owner >= 0) ? owner : shapeIndex;
         
-        float sdOwner = _sdShapeAt(shapeIdx, pSdf);
-        float wAa = max(fwidth(sdOwner), 1e-6) * GLOW_OWNER_FEATHER_PX;
-        float inShape = smoothstep(0.0, wAa, -sdOwner);
+        float sdOwner = _sdShapeAt(targetShape, positionSdf);
+        float widthAa = max(fwidth(sdOwner), 1e-6) * GLOW_OWNER_FEATHER_PX;
+        float inShape = smoothstep(0.0, widthAa, -sdOwner);
         
         if (inShape <= 1e-5) continue;
         
-        vec4 tp = uTouches[i];
-        float d = length(pPx - tp.xy);
-        float inner = tp.z;
-        float outer = tp.z + max(tp.w, 1e-3);
-        float radial = smoothstep(outer, inner, d);
-        float s = clamp(uTouchGlowStrengths[i], 0.0, 1.0);
+        vec4 touchParams = uTouches[i];
+        float dist = length(positionPixels - touchParams.xy);
+        float inner = touchParams.z;
+        float outer = touchParams.z + max(touchParams.w, 1e-3);
+        float radial = smoothstep(outer, inner, dist);
+        float strength = clamp(uTouchGlowStrengths[i], 0.0, 1.0);
         
-        outMask = max(outMask, radial * inShape * s);
+        outMask = max(outMask, radial * inShape * strength);
     }
     return outMask;
-}
-
-// Approximates a Gaussian blur using a 9-tap kernel for glow effects.
-vec4 _blurApprox9(sampler2D tex, vec2 uv, float sigmaPx, vec2 sizePx) {
-    if (sigmaPx <= 0.01) return _sampleTexture(tex, uv);
-    
-    vec2 px = 1.0 / sizePx;
-    float s = clamp(sigmaPx, 0.0, 6.0);
-    float w0 = 0.227027;
-    float w1 = 0.194594;
-    float w2 = 0.121621;
-    
-    vec4 c = _sampleTexture(tex, uv) * w0;
-    c += _sampleTexture(tex, uv + vec2( px.x,  0.0)) * w1;
-    c += _sampleTexture(tex, uv + vec2(-px.x,  0.0)) * w1;
-    c += _sampleTexture(tex, uv + vec2( 0.0,  px.y)) * w1;
-    c += _sampleTexture(tex, uv + vec2( 0.0, -px.y)) * w1;
-    c += _sampleTexture(tex, uv + vec2( px.x,  px.y)) * w2;
-    c += _sampleTexture(tex, uv + vec2(-px.x,  px.y)) * w2;
-    c += _sampleTexture(tex, uv + vec2( px.x, -px.y)) * w2;
-    c += _sampleTexture(tex, uv + vec2(-px.x, -px.y)) * w2;
-    
-    float t = clamp((s - 1.0) / 5.0, 0.0, 1.0);
-    return mix(_sampleTexture(tex, uv), c, t);
 }
 
 // Applies dynamic glow effects based on touch input and overrides.
@@ -690,9 +699,9 @@ vec4 _applyInteractiveGlow(
     vec2 screenUV,
     vec2 refractionDisplacement,
     vec2 childUVBase,
-    vec2 p,
-    float sd,
-    int currentShapeIdx,
+    vec2 position,
+    float signedDistance,
+    int shapeIndex,
     vec2 uSizePx,
     sampler2D backgroundTexture,
     sampler2D childTexture,
@@ -701,49 +710,42 @@ vec4 _applyInteractiveGlow(
     float saturation,
     vec3 backgroundColor
 ) {
-    // Basic Check
-    if (currentShapeIdx < 0 || uTouchCount_f <= 0.5) return coloredBase;
+    if (shapeIndex < 0 || uTouchCount_f <= 0.5) return coloredBase;
 
-    // 1. Daten für dieses Shape aus dem Array lesen
-    int baseIdx = currentShapeIdx * 4;
+    int baseIndex = shapeIndex * 4;
     
-    vec4 data0 = uShapeGlowData[baseIdx + 0]; // RGB=Color, W=ColorAlpha (NEU)
-    vec4 data1 = uShapeGlowData[baseIdx + 1]; // X=Power, Y=Mix, Z=Blur, W=Inside
-    vec4 data2 = uShapeGlowData[baseIdx + 2]; // X=Light, Y=Sat, Z=TintMode, W=Strength (NEU)
-    vec4 data3 = uShapeGlowData[baseIdx + 3]; // RGBA=GlowGlassOverride
+    vec4 data0 = uShapeGlowData[baseIndex + 0]; // RGB=Color, W=ColorAlpha
+    vec4 data1 = uShapeGlowData[baseIndex + 1]; // X=Power, Y=Mix, Z=Blur, W=Inside
+    vec4 data2 = uShapeGlowData[baseIndex + 2]; // X=Light, Y=Sat, Z=TintMode, W=Strength
+    vec4 data3 = uShapeGlowData[baseIndex + 3]; // RGBA=GlowGlassOverride
 
-    // Strength kommt jetzt aus data2.w
-    float gStrength = data2.w;
+    float glowStrength = data2.w;
     
-    // Early Exit Check
-    if (gStrength <= 0.0001) {
+    if (glowStrength <= 0.0001) {
         return coloredBase;
     }
     
-    float gInside = data1.w;
-    float maskRaw = _computeTouchGlowMask(p, p, gInside, sd, currentShapeIdx);
+    float glowInside = data1.w;
+    float maskRaw = _computeTouchGlowMask(position, position, glowInside, signedDistance, shapeIndex);
     
     if (maskRaw <= 0.0) {
         return coloredBase;
     }
     
-    float gPower = max(data1.x, 0.0001);
-    float gMix = clamp(data1.y, 0.0, 1.0);
+    float glowPower = max(data1.x, 0.0001);
+    float glowMix = clamp(data1.y, 0.0, 1.0);
     
-    float shaped = pow(clamp(maskRaw, 0.0, 1.0), gPower) * gStrength * gMix;
+    float shaped = pow(clamp(maskRaw, 0.0, 1.0), glowPower) * glowStrength * glowMix;
     shaped = clamp(shaped, 0.0, 1.0);
 
-    // Overrides prüfen (-1.0 bedeutet "nicht gesetzt")
     float tLight = data2.x;
-    float tSatu  = data2.y;
-    // Glass Tint Override (Wenn nicht gesetzt, ist es die globale Farbe)
-    vec4 tGlass  = data3;
+    float tSat = data2.y;
+    vec4 tGlass = data3;
 
-    float effLight = (tLight > -0.5) ? mix(lightness, tLight, shaped) : lightness;
-    float effSatu  = (tSatu > -0.5)  ? mix(saturation, tSatu, shaped) : saturation;
-    vec4 effGlass  = mix(uGlassColor, tGlass, shaped);
+    float effectiveLight = (tLight > -0.5) ? mix(lightness, tLight, shaped) : lightness;
+    float effectiveSat = (tSat > -0.5)  ? mix(saturation, tSat, shaped) : saturation;
+    vec4 effectiveGlass = mix(uGlassColor, tGlass, shaped);
 
-    // Blur Override
     vec4 refractLocal = refractColorBase;
     float tBlur = data1.z;
     float extraSigma = (tBlur > -0.5) ? max(tBlur - uGlobalBlurSigma, 0.0) : 0.0;
@@ -751,50 +753,45 @@ vec4 _applyInteractiveGlow(
     if (extraSigma > 0.01) {
         vec2 uvBase = screenUV + refractionDisplacement;
         refractLocal = _blurApprox9(backgroundTexture, uvBase, extraSigma, uSizePx);
-        vec4 cC = _sampleTexture(childTexture, childUVBase + refractionDisplacement);
-        refractLocal = mix(refractLocal, cC, cC.a);
+        vec4 childColor = _sampleTexture(childTexture, childUVBase + refractionDisplacement);
+        refractLocal = mix(refractLocal, childColor, childColor.a);
     }
 
-    vec4 coloredLocal = _blendGlassTint(refractLocal, effGlass);
+    vec4 coloredLocal = _blendGlassTint(refractLocal, effectiveGlass);
     coloredLocal.rgb += lighting;
-    coloredLocal.rgb = _adjustColorBalance(coloredLocal.rgb, effSatu, effLight);
+    coloredLocal.rgb = _adjustColorBalance(coloredLocal.rgb, effectiveSat, effectiveLight);
 
-    // Tint Mode Logic
-    float gTintMode = data2.z;
-    float colorAlpha = data0.w; // NEU: Alpha kommt jetzt aus data0.w
+    float glowTintMode = data2.z;
+    float colorAlpha = data0.w;
 
     vec3 tint;
-    if (gTintMode < 0.5) {
-        tint = vec3(1.0); // Weiß
-    } else if (gTintMode < 1.5) {
-        tint = _computeAdaptiveHighlight(backgroundColor, 1.0); // Adaptiv
+    if (glowTintMode < 0.5) {
+        tint = vec3(1.0);
+    } else if (glowTintMode < 1.5) {
+        tint = _computeAdaptiveHighlight(backgroundColor, 1.0);
     } else {
-        tint = data0.rgb; // Custom Color
+        tint = data0.rgb;
     }
     
-    // Tint auftragen. 
-    // Wir multiplizieren die Stärke des Effekts (shaped) mit dem Alpha der Farbe.
     vec4 tintGlass = vec4(tint, shaped * colorAlpha); 
-    
     coloredLocal = _blendGlassTint(coloredLocal, tintGlass);
     
     return mix(coloredBase, coloredLocal, shaped);
 }
 
 // Main rendering function for the Liquid Glass effect.
-// Integrates refraction, lighting, glass tinting, and interactive glow.
 vec4 renderLiquidGlass(
     vec2 screenUV,
     vec2 childUVBase,
-    vec2 p, vec2 uSizePx,
-    float sd, float thickness,
+    vec2 position, vec2 uSizePx,
+    float signedDistance, float thickness,
     float refractiveIndex, float chromaticAberration,
     vec4 glassColor, vec2 lightDirection, float lightIntensity, float ambientStrength,
     sampler2D backgroundTexture,
     sampler2D childTexture,
     vec3 normal, float foregroundAlpha,
-    float saturation, float lightness, float rimWidthPx, float rimSharpness,
-    int currentShapeIdx
+    float saturation, float lightness, float rimWidthPixels, float rimSharpness,
+    int shapeIndex
 ) {
     vec4 backgroundColor = _sampleTexture(backgroundTexture, screenUV);
     
@@ -802,46 +799,48 @@ vec4 renderLiquidGlass(
         return backgroundColor;
     }
 
-    float height = _calculateLiquidHeight(sd, thickness);
-    vec2 refractionDisplacement;
+    float height = _calculateLiquidHeight(signedDistance, thickness);
+    
+    vec3 lighting = _calculateTotalLighting(
+        screenUV, normal, signedDistance, thickness, height,
+        lightDirection, lightIntensity, ambientStrength,
+        backgroundColor.rgb, rimWidthPixels, rimSharpness
+    );
 
+    vec2 refractionDisplacement;
+    vec4 rawRefractionTexture;
+    
     vec4 refractColorBase = _calculateRefractionLayer(
-        screenUV, normal, sd, height, thickness,
+        screenUV, normal, signedDistance, height, thickness,
         refractiveIndex, chromaticAberration,
         uSizePx, backgroundTexture,
         childTexture, childUVBase,
-        refractionDisplacement,
-        rimWidthPx, rimSharpness, lightDirection, lightIntensity,
-        currentShapeIdx
+        refractionDisplacement, rawRefractionTexture,
+        rimWidthPixels, rimSharpness, lightDirection, lightIntensity,
+        shapeIndex,
+        saturation, lightness, glassColor, lighting
     );
 
-    refractColorBase.rgb = _applyRimHighlight(refractColorBase.rgb, normal, sd, rimWidthPx, rimSharpness);
-
-    vec3 lighting = _calculateTotalLighting(
-        screenUV, normal, sd, thickness, height,
-        lightDirection, lightIntensity, ambientStrength,
-        backgroundColor.rgb, rimWidthPx, rimSharpness
+    refractColorBase.rgb = _applyRimHighlight(
+        refractColorBase.rgb, normal, signedDistance,
+        rimWidthPixels, rimSharpness, saturation, lightness, glassColor
     );
-
-    vec4 coloredBase = _blendGlassTint(refractColorBase, glassColor);
-    coloredBase.rgb += lighting;
-    coloredBase.rgb = _adjustColorBalance(coloredBase.rgb, saturation, lightness);
 
     vec4 outColor = _applyInteractiveGlow(
-        coloredBase, refractColorBase, screenUV, refractionDisplacement, childUVBase,
-        p, sd, currentShapeIdx, uSizePx, backgroundTexture, childTexture,
+        refractColorBase, rawRefractionTexture, screenUV, refractionDisplacement, childUVBase,
+        position, signedDistance, shapeIndex, uSizePx, backgroundTexture, childTexture,
         lighting, lightness, saturation, backgroundColor.rgb
     );
 
-    float coverage = _computeCoverageAA(sd);
-    float baseA = foregroundAlpha * coverage;
+    float coverage = _computeCoverageAA(signedDistance);
+    float baseAlpha = foregroundAlpha * coverage;
     
-    RimMasks rm = _calculateRimMasks(sd, rimWidthPx, rimSharpness);
-    float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPx / 64.0, 0.0, 1.0));
-    float rimA = rm.band * edgeAlphaGain;
-    float mixA = clamp(max(baseA, rimA), 0.0, 1.0);
+    RimMasks masks = _calculateRimMasks(signedDistance, rimWidthPixels, rimSharpness);
+    float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
+    float rimAlpha = masks.band * edgeAlphaGain;
+    float mixAlpha = clamp(max(baseAlpha, rimAlpha), 0.0, 1.0);
 
-    return mix(backgroundColor, outColor, mixA);
+    return mix(backgroundColor, outColor, mixAlpha);
 }
 
 #endif
