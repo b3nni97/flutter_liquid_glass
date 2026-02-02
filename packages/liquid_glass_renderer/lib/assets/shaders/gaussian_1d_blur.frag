@@ -46,26 +46,11 @@ vec2 _mirror01(vec2 uv){
   return mix(m, 2.0 - m, step(1.0, m));
 }
 
-vec2 _tile_uv(vec2 uv, vec2 size, float mode){
-  if (mode < 0.5) {       // clamp
-    vec2 eps = 0.5 / max(size, vec2(1.0));
-    return clamp(uv, eps, vec2(1.0) - eps);
-  } else if (mode < 1.5) { // repeat
-    return fract(uv);
-  } else if (mode < 2.5) { // mirror
-    return _mirror01(uv);
-  } else {                 // decal
-    return uv;
-  }
-}
-
-vec4 _sample_screen(vec2 uv){
-  if (u_tile_mode >= 2.5) {
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
-      return vec4(0.0);
-    }
-  }
-  return texture(uBackgroundTexture, _tile_uv(uv, uSize, u_tile_mode));
+vec4 _sample_screen_clamped(vec2 uv) {
+    // Berechne Epsilon basierend auf Pixelgröße, um Kantenflimmern zu vermeiden
+    vec2 eps = vec2(0.5) / max(uSize, vec2(1.0));
+    vec2 clampedUV = clamp(uv, eps, vec2(1.0) - eps);
+    return texture(uBackgroundTexture, clampedUV);
 }
 
 // Verhindert DCE (Dead Code Elimination) für ungenutzte Uniforms
@@ -73,6 +58,7 @@ void _preserve_header_uniforms(vec2 uv){
   if (uGlassColor.w > 2e9) fragColor += 0.001;
   // uTransform anfassen, damit es nicht wegoptimiert wird
   if (uTransform[0][0] > 2e9) fragColor += 0.001; 
+  if (uBlurHeader.w > 2e9) fragColor += 0.001;
 }
 
 // ───────────────────── 1D Blur Logic ───────────────────────────────────────
@@ -81,26 +67,28 @@ vec4 _blur1D(vec2 baseUV){
   vec2 step_vec = vec2(u_dir_x * invSize.x, u_dir_y * invSize.y);
 
   if (!(u_sample_count > 0.5)) {
-    return _sample_screen(baseUV);
+    return _sample_screen_clamped(baseUV);
   }
   int nS = int(u_sample_count + 0.5);
 
   vec4 sum = vec4(0.0);
+  
+  // UNROLL FRIENDLY LOOP
   for (int i = 0; i < 50; ++i) {
     if (i >= nS) break;
     float t = u_samples[i].x;
     float w = u_samples[i].z;
-    sum += w * _sample_screen(baseUV + step_vec * t);
+    
+    // Einfach Sample + Weight. Kein If, kein TileMode Call.
+    sum += w * _sample_screen_clamped(baseUV + step_vec * t);
   }
   return sum;
 }
-
 // ───────────────────── SDF Include ─────────────────────────────────────────
 #include "lg_union_sdf.glsl"
 
 // ───────────────────── Main ────────────────────────────────────────────────
 void main(){
-  // 1. Screen Koordinaten
   vec2 pScreen = FlutterFragCoord().xy;
   vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
   vec2 uv = pScreen * invSize;
@@ -111,34 +99,19 @@ void main(){
 
   _preserve_header_uniforms(uv);
 
-  // 2. Koordinaten FIX: 
-  // Wir nutzen pScreen direkt. Keine Matrix-Multiplikation mit uTransform!
-  // Wir wenden jedoch die Translation (aus uTransform) auf pScreen an, 
-  // falls der Layer verschoben ist, damit die SDFs an der richtigen Stelle sitzen.
-  // Da uTransform im Blur-Shader normalerweise Identity ist (oder nur Translation), 
-  // extrahieren wir die Translation.
-  
-  // ACHTUNG: Im Main-Shader nutzen wir uTransform * pScreen. 
-  // Im Blur-Shader nutzen wir normalerweise denselben Koordinatenraum.
-  // Wir extrahieren die Translation (uTransform[3].xy) und addieren sie,
-  // damit die SDFs deckungsgleich mit dem Glas-Pass sind.
-
   vec2 p = pScreen; 
 
-  // 3. Maske berechnen
   int dummyIdx;
   float sd = sceneSDF_withIndex_fast(p, dummyIdx);
   float mask = lg_foreground_alpha(sd);
 
-  vec4 src = _sample_screen(uv);
+  vec4 src = _sample_screen_clamped(uv);
 
-  // Performance Exit
   if (mask < 0.001) {
     fragColor = src;
     return;
   }
 
-  // 4. Blurren und Mischen
   vec4 blurred = _blur1D(uv);
   fragColor = mix(src, blurred, mask);
 }

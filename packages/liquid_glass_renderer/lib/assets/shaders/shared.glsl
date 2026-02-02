@@ -119,20 +119,6 @@ vec4 _sampleNearest(sampler2D tex, vec2 uv, vec2 texSize) {
     return texture(tex, clamp(nearestUV, vec2(0.0), vec2(1.0)));
 }
 
-// Applies texture wrapping modes: 0=Clamp, 1=Repeat, 2=Mirror.
-vec2 _applyTileMode(vec2 uv, vec2 size, float mode) {
-    if (mode < 0.5) {
-        vec2 eps = 0.5 / size;
-        return clamp(uv, eps, vec2(1.0) - eps);
-    } else if (mode < 1.5) {
-        return fract(uv);
-    } else if (mode < 2.5) {
-        vec2 m = mod(uv, 2.0);
-        return mix(m, 2.0 - m, step(1.0, m));
-    }
-    return uv;
-}
-
 // Decodes shape geometry data from the uniform array.
 void _readShapeData(int shapeIndex, out float type, out vec2 center, out vec2 size, out float cornerRadius) {
     int baseIndex = shapeIndex * 7;
@@ -201,15 +187,21 @@ vec4 _applyGaussianBlur(sampler2D tex, vec2 baseUV) {
     vec2 stepVec = vec2(u_dir_x * pixel.x, u_dir_y * pixel.y);
     
     float sampleCountRaw = u_sample_count;
+    
+    // Safety clamp Epsilon (0.5px vom Rand wegbleiben)
+    vec2 eps = vec2(0.5) / max(uSize, vec2(1.0));
+    vec2 minUV = eps;
+    vec2 maxUV = vec2(1.0) - eps;
+
     if (sampleCountRaw <= 0.5) {
-        vec2 eps = vec2(0.5 / uSize.x, 0.5 / uSize.y);
-        return texture(tex, clamp(baseUV, eps, vec2(1.0) - eps));
+        return texture(tex, clamp(baseUV, minUV, maxUV));
     }
 
     vec4 sum = vec4(0.0);
     float weightSum = 0.0;
     int sampleCount = int(sampleCountRaw + 0.5);
 
+    // PERFORMANCE BOOST: Keine IFs mehr im Loop!
     for (int i = 0; i < 50; ++i) {
         if (i >= sampleCount) break;
         
@@ -219,23 +211,18 @@ vec4 _applyGaussianBlur(sampler2D tex, vec2 baseUV) {
         if (weight <= 1e-6) continue;
 
         vec2 offsetUV = baseUV + stepVec * t;
-        vec4 sampleColor;
         
-        if (u_tile_mode >= 2.5 && (any(lessThan(offsetUV, vec2(0.0))) || any(greaterThan(offsetUV, vec2(1.0))))) {
-            sampleColor = vec4(0.0);
-        } else {
-            vec2 tiledUV = _applyTileMode(offsetUV, uSize, u_tile_mode);
-            sampleColor = texture(tex, tiledUV);
-        }
+        // Simples, schnelles Clamping
+        vec2 clampedUV = clamp(offsetUV, minUV, maxUV);
         
-        sum += weight * sampleColor;
+        sum += weight * texture(tex, clampedUV);
         weightSum += weight;
     }
 
     if (weightSum > 1e-6) {
         return sum / weightSum;
     }
-    return texture(tex, baseUV);
+    return texture(tex, clamp(baseUV, minUV, maxUV));
 }
 
 // Approximates a Gaussian blur using a 9-tap kernel for glow effects.
