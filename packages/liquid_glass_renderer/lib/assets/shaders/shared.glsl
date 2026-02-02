@@ -164,23 +164,37 @@ vec2 _projectSdfToScreen(vec2 positionSdf) {
     return positionScreen.xy / w;
 }
 
-// Applies a multi-tap jittered blur to the child texture to prevent aliasing.
+// ERSETZEN: _blurJitterRefraction
+// Optimierung: Nur 1 Sample wenn Blur klein ist.
+// LOGIK: Kein Half-Pixel-Offset, damit Text/Child scharf bleibt.
 vec4 _blurJitterRefraction(sampler2D tex, vec2 uv, float blurAmount, vec2 sizePixels, vec2 seed) {
-    if (blurAmount <= 0.05) {
-        return _sampleNearest(tex, uv, uChildSize);
+    // 1. Ultra-Fast Path: Fast kein Blur -> Gestochen scharf (Linear Sampling)
+    if (blurAmount <= 0.1) {
+        return _sampleTexture(tex, uv); 
     }
     
     vec2 pixelSize = 1.0 / sizePixels;
+    
+    // 2. Fast Path: Moderater Blur (< 2.0px) -> 1 Jitter Sample
+    if (blurAmount < 1.0) {
+        float r = _hashRefraction(seed) - 0.5; // -0.5 bis 0.5
+        vec2 jitter = vec2(r, -r) * blurAmount * pixelSize;
+        // Hier nutzen wir normales Sampling ohne Extra-Offset für Lesbarkeit
+        return _sampleTexture(tex, uv + jitter);
+    }
+    
+    // 3. High Quality Path: Starker Blur -> 4 Samples (Frosted Look)
+    // Hier nutzen wir _sampleNearest für den "Frosted" Noise-Look bei starkem Blur,
+    // oder _sampleTexture wenn du es "cremig" willst. Ich lasse es auf Nearest für Performance/Look.
     float spread = blurAmount * 0.7; 
     
-    vec4 color = _sampleNearest(tex, uv + vec2(-spread, -spread) * pixelSize, uChildSize);
-    color += _sampleNearest(tex, uv + vec2( spread, -spread) * pixelSize, uChildSize);
-    color += _sampleNearest(tex, uv + vec2(-spread,  spread) * pixelSize, uChildSize);
-    color += _sampleNearest(tex, uv + vec2( spread,  spread) * pixelSize, uChildSize);
+    vec4 color = _sampleNearest(tex, uv + vec2(-spread, -spread) * pixelSize, sizePixels);
+    color += _sampleNearest(tex, uv + vec2( spread, -spread) * pixelSize, sizePixels);
+    color += _sampleNearest(tex, uv + vec2(-spread,  spread) * pixelSize, sizePixels);
+    color += _sampleNearest(tex, uv + vec2( spread,  spread) * pixelSize, sizePixels);
     
     return color * 0.25;
 }
-
 // Applies a 1D Gaussian blur based on uniform samples.
 vec4 _applyGaussianBlur(sampler2D tex, vec2 baseUV) {
     vec2 pixel = vec2(1.0 / uSize.x, 1.0 / uSize.y);
@@ -436,7 +450,8 @@ vec3 _blendHardLight(vec3 base, vec3 blend) {
     return mix(t1, t2, selection);
 }
 
-// Resolves chromatic aberration using a hybrid approach of background and child texture sampling.
+// ERSETZEN: _resolveDispersion
+// Optimierung: "Simplified Real Sampling" mit "Half-Pixel AA" für Background.
 vec3 _resolveDispersion(
     vec2 uvBase,
     vec2 childUVBase,
@@ -446,11 +461,12 @@ vec3 _resolveDispersion(
     sampler2D childTexture,
     int shapeIndex,
     float aberrationStrength,
-    vec4 baseColor,
+    vec4 baseColor, 
     float saturation,
     float lightness,
     vec4 glassColor
 ) {
+    // --- Berechnung der Koordinaten (Identisch) ---
     float type, radius;
     vec2 centerSdf, sizeSdf;
     _readShapeData(shapeIndex, type, centerSdf, sizeSdf, radius);
@@ -473,53 +489,48 @@ vec3 _resolveDispersion(
     vec2 distCubed = distUV * distUV * distUV;
     
     float distortMagnitude = length(refractionDisplacement);
-    float boost = 1.0 + (distortMagnitude * 100.0);
+    float boost = 1.0 + (distortMagnitude * 60.0);
     vec2 aberrationUV = (dispersion * distCubed * minDimOverSize) * boost;
     
-    vec2 uvRed = uvBase - aberrationUV;
-    vec2 uvGreen = uvBase;
-    vec2 uvBlue = uvBase + aberrationUV;
-    
-    vec2 pxRed = _pxFromUv(uvRed, sizePixels);
-    vec2 pxBlue = _pxFromUv(uvBlue, sizePixels);
-    
-    vec2 pointRed = (uTransform * vec4(pxRed, 0.0, 1.0)).xy;
-    vec2 pointBlue = (uTransform * vec4(pxBlue, 0.0, 1.0)).xy;
-    
-    bool validRed = (_sdShapeAt(shapeIndex, pointRed) <= 0.0);
-    bool validBlue = (_sdShapeAt(shapeIndex, pointBlue) <= 0.0);
-    
-    vec4 sampleGreenBg = _sampleAberrationAA(backgroundTexture, uvGreen, aberrationUV, sizePixels);
-    vec4 sampleRedBg = validRed ? _sampleAberrationAA(backgroundTexture, uvRed, aberrationUV, sizePixels) : sampleGreenBg;
-    vec4 sampleBlueBg = validBlue ? _sampleAberrationAA(backgroundTexture, uvBlue, aberrationUV, sizePixels) : sampleGreenBg;
+    // --- OPTIMIERUNG: Half-Pixel Trick ---
+    // Wir berechnen einen halben Pixel Offset.
+    // Das zwingt die GPU, beim Samplen des Hintergrunds 4 Pixel zu mischen -> Weicheres CA.
+    vec2 halfPx = (1.0 / sizePixels) * 0.5;
 
-    sampleGreenBg = _blendGlassTint(sampleGreenBg, glassColor);
-    sampleGreenBg.rgb = _adjustColorBalance(sampleGreenBg.rgb, saturation, lightness);
-    sampleRedBg = _blendGlassTint(sampleRedBg, glassColor);
-    sampleRedBg.rgb = _adjustColorBalance(sampleRedBg.rgb, saturation, lightness);
-    sampleBlueBg = _blendGlassTint(sampleBlueBg, glassColor);
-    sampleBlueBg.rgb = _adjustColorBalance(sampleBlueBg.rgb, saturation, lightness);
+    vec2 uvRed = uvBase - aberrationUV + halfPx;
+    vec2 uvBlue = uvBase + aberrationUV + halfPx;
     
-    vec4 sampleGreenChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement);
+    // Background Samples (mit Half-Pixel Weichzeichner)
+    vec4 sampleRedBg = _sampleTexture(backgroundTexture, uvRed);
+    vec4 sampleBlueBg = _sampleTexture(backgroundTexture, uvBlue);
+    
+    // Child Samples (OHNE Half-Pixel, damit Text lesbar bleibt, falls er hier auftaucht)
     vec4 sampleRedChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement - aberrationUV);
     vec4 sampleBlueChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement + aberrationUV);
-    
-    if (!validRed) sampleRedChild = sampleGreenChild;
-    if (!validBlue) sampleBlueChild = sampleGreenChild;
-    
-    vec3 colorRed = (sampleRedChild.a > 0.001) ? sampleRedChild.rgb / sampleRedChild.a : sampleRedChild.rgb;
-    vec3 colorGreen = (sampleGreenChild.a > 0.001) ? sampleGreenChild.rgb / sampleGreenChild.a : sampleGreenChild.rgb;
-    vec3 colorBlue = (sampleBlueChild.a > 0.001) ? sampleBlueChild.rgb / sampleBlueChild.a : sampleBlueChild.rgb;
+    vec4 sampleGreenChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement); 
 
+    // --- Ab hier Standard Logik ---
+    
+    sampleRedBg = _blendGlassTint(sampleRedBg, glassColor);
+    sampleRedBg.rgb = _adjustColorBalance(sampleRedBg.rgb, saturation, lightness);
+    
+    sampleBlueBg = _blendGlassTint(sampleBlueBg, glassColor);
+    sampleBlueBg.rgb = _adjustColorBalance(sampleBlueBg.rgb, saturation, lightness);
+
+    if (sampleRedChild.a <= 0.001) sampleRedChild = sampleGreenChild;
+    if (sampleBlueChild.a <= 0.001) sampleBlueChild = sampleGreenChild;
+
+    vec3 colorRed = (sampleRedChild.a > 0.001) ? sampleRedChild.rgb / sampleRedChild.a : sampleRedChild.rgb;
+    vec3 colorBlue = (sampleBlueChild.a > 0.001) ? sampleBlueChild.rgb / sampleBlueChild.a : sampleBlueChild.rgb;
+    
     vec3 hardLightRed = _blendHardLight(sampleRedBg.rgb, colorRed);
     float redComponent = mix(sampleRedBg.r, hardLightRed.r, sampleRedChild.a);
 
-    vec3 hardLightGreen = _blendHardLight(sampleGreenBg.rgb, colorGreen);
-    float greenComponent = mix(sampleGreenBg.g, hardLightGreen.g, sampleGreenChild.a);
-
     vec3 hardLightBlue = _blendHardLight(sampleBlueBg.rgb, colorBlue);
     float blueComponent = mix(sampleBlueBg.b, hardLightBlue.b, sampleBlueChild.a);
-    
+
+    float greenComponent = baseColor.g; 
+
     vec3 spectralNew = vec3(redComponent, greenComponent, blueComponent);
     vec3 diff = spectralNew - baseColor.rgb;
     diff *= float(LG_CA_LIGHTNESS_BOOST) * float(LG_CA_NEW_GAIN);
@@ -566,6 +577,7 @@ vec4 _calculateRefractionLayer(
     float stretch = length(fwidth(displacementPixels));
     float blurRadius = clamp(stretch * 0.45, 0.0, 6.0);
 
+    // 1. Base Background Sample
     vec4 backgroundSample = _applyGaussianBlur(backgroundTexture, uvBase);
     
     outRawTexture = backgroundSample;
@@ -574,6 +586,7 @@ vec4 _calculateRefractionLayer(
     backgroundSample.rgb += lighting;
     backgroundSample.rgb = _adjustColorBalance(backgroundSample.rgb, saturation, lightness);
     
+    // 2. Child Sample & Blend (immer notwendig)
     vec4 childSample = _blurJitterRefraction(childTexture, uvChild, blurRadius, sizePixels, uvChild);
     
     vec3 childRGB = (childSample.a > 0.001) ? childSample.rgb / childSample.a : childSample.rgb;
@@ -581,10 +594,24 @@ vec4 _calculateRefractionLayer(
     
     backgroundSample.rgb = mix(backgroundSample.rgb, blended, childSample.a);
     
+    // -------------------------------------------------------------------------
+    // PERFORMANCE OPTIMIZATION: Aggressive Early Exit
+    // -------------------------------------------------------------------------
     float ca = max(chromaticAberration, 0.0);
-    if (ca <= 1e-4) return backgroundSample;
+    
+    // Wenn CA sehr klein ist (< 0.5%), lohnt sich der teure Multi-Sample Aufwand nicht.
+    // Wir geben einfach das bisher berechnete Ergebnis zurück.
+    if (ca <= 0.005) {
+        return vec4(clamp(backgroundSample.rgb, 0.0, 1.0), backgroundSample.a);
+    }
+
+    // -------------------------------------------------------------------------
+    // High Quality Path (Chromatische Aberration & Extra AA)
+    // -------------------------------------------------------------------------
 
     vec2 dirRefUV = displacementPixels / sizePixels;
+    
+    // Teures Extra-AA Sampling
     vec4 baseAA = _sampleRefractionAA(
         backgroundTexture, uvBase, sizePixels, dirRefUV,
         float(LG_REFRACT_AA_RADIUS_PX),
@@ -599,6 +626,7 @@ vec4 _calculateRefractionLayer(
     vec3 blendedAA = _blendHardLight(baseAA.rgb, childRGB);
     backgroundSample = vec4(mix(baseAA.rgb, blendedAA, childSample.a), baseAA.a);
 
+    // Teure Dispersion Calculation
     vec3 diffNew = _resolveDispersion(
         uvBase, childUVBase, outRefractionDisplacement, sizePixels,
         backgroundTexture, childTexture, shapeIndex, ca, backgroundSample,
