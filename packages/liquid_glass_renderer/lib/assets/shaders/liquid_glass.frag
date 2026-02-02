@@ -123,7 +123,7 @@ void main() {
     float rimWidthPx = uRimParams.x;
     float rimSharpness = uRimParams.y;
     float uNormalPlateauWidth = uNormalParams.x;
-    float uNormalSoftness = uNormalParams.y;
+    float uNormalSoftness = uNormalParams.y; // <--- Das nutzen wir unten für die Scale-Rampe
 
     // Coordinate System Setup
     vec2 pScreen = FlutterFragCoord().xy;
@@ -157,12 +157,27 @@ void main() {
         return;
     }
 
-    // Dynamic Scaling logic for liquid effect
-    vec2 s = max(uBgScale, vec2(1e-4));
+    // --- DYNAMIC BACKGROUND SCALING (Controlled by NormalSoftness) ---
+    vec2 targetScale = max(uBgScale, vec2(1e-4));
+
+    // HIER DIE ÄNDERUNG:
+    // Wir nutzen uNormalSoftness als Breite für den Übergang.
+    // Wir klemmen es auf min 1.0, um Division durch Null im smoothstep zu verhindern.
+    // Das bedeutet: Der Scale blendet genau in dem Bereich ein, in dem auch die Kante "weich" wird.
+    float scaleRampWidth = max(uNormalSoftness, 1.0); 
+    
+    // smoothstep berechnet den Faktor 0.0 (Rand) bis 1.0 (Innen) über die Distanz der Softness
+    float scaleWeight = smoothstep(0.0, scaleRampWidth, -sdUnion);
+    
+    // Interpolation: 
+    // Am Rand (scaleWeight=0) -> vec2(1.0) (Kein Zoom, pixelgenaues Matching)
+    // Innen (scaleWeight=1)   -> targetScale (Dein Zoom)
+    vec2 dynamicS = mix(vec2(1.0), targetScale, scaleWeight);
+    // ---------------------------------------------------------------
+
     float cx = uShapeData[idx * 7 + 1];
     float cy = uShapeData[idx * 7 + 2];
 
-    // NOTE: Using refactored name _projectSdfToScreen (was _sdfToScreenPx)
     vec2 centerScreenPx = _projectSdfToScreen(vec2(cx, cy));
     vec2 centerUV = centerScreenPx * invSize;
 
@@ -170,7 +185,9 @@ void main() {
     centerUV.y = 1.0 - centerUV.y;
     #endif
 
-    vec2 scaledUV = centerUV + (screenUV - centerUV) / s;
+    // Anwenden des dynamischen Scales
+    vec2 scaledUV = centerUV + (screenUV - centerUV) / dynamicS;
+    
     vec2 childUVRaw = uChildProjection.xy + childUV;
 
     // Normal Calculation
@@ -179,7 +196,7 @@ void main() {
 
     // Render Final Composite
     fragColor = renderLiquidGlass(
-        scaledUV,
+        scaledUV, 
         childUVRaw,
         p,
         uSize,

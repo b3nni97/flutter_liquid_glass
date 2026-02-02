@@ -436,10 +436,11 @@ vec3 _applyRimHighlight(
     return mix(baseColor, rimColor.rgb, clamp(amount, 0.0, 1.0));
 }
 
-// Computes anti-aliased coverage for the shape edge.
 float _computeCoverageAA(float signedDistance) {
     float width = fwidth(signedDistance);
-    return smoothstep(-width, width, -signedDistance);
+    // "Shave" 0.5 Pixel vom Rand ab
+    float shave = width * 0.5; 
+    return smoothstep(shave, width * 1.5 + shave, -signedDistance);
 }
 
 // Blends two colors using the Hard Light blend mode.
