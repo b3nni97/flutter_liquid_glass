@@ -283,6 +283,7 @@ vec3 _computeAdaptiveHighlight(vec3 backgroundColor, float targetBrightness) {
     return mix(whiteHighlight, coloredHighlight, colorInfluence);
 }
 
+// FIX: renamed 'uThickness' to 'thickness' to avoid macro collision
 float _calculateLiquidHeight(float signedDistance, float thickness) {
     if (signedDistance >= 0.0) return 0.0;
     if (thickness <= 0.0) return 0.0;
@@ -292,13 +293,14 @@ float _calculateLiquidHeight(float signedDistance, float thickness) {
     return sqrt(max(0.0, thickness * thickness - x * x));
 }
 
-RimMasks _calculateRimMasks(float signedDistance, float rimWidthPixels, float rimSharpness) {
+// FIX: renamed params to avoid macro collision
+RimMasks _calculateRimMasks(float signedDistance, float rimWidthPixels, float rimSharp) {
     vec2 gradient = vec2(dFdx(signedDistance), dFdy(signedDistance));
     float gradientMagnitude = max(length(gradient), 1e-6);
     float widthSdf = max(rimWidthPixels, 0.0) * gradientMagnitude;
     
     float edge01 = step(signedDistance, 0.0) * smoothstep(-widthSdf, 0.0, signedDistance);
-    float gamma = max(rimSharpness, 1e-3);
+    float gamma = max(rimSharp, 1e-3);
     
     float band = pow(edge01, 1.0 / gamma);
     float coreExponent = mix(3.0, 1.1, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
@@ -343,8 +345,6 @@ vec3 _adjustColorBalance(vec3 color, float saturation, float lightness) {
     return clamp(adjustedColor, 0.0, 1.0);
 }
 
-// _applyRimHighlight wurde hier entfernt, da es in main nicht mehr aufgerufen wird.
-
 float _computeCoverageAA(float signedDistance) {
     float width = fwidth(signedDistance);
     float shave = width * 0.5; 
@@ -358,6 +358,7 @@ vec3 _blendHardLight(vec3 base, vec3 blend) {
     return mix(t1, t2, selection);
 }
 
+// FIX: renamed params uGlassColor -> glassColor, uSaturation -> saturation, uLightness -> lightness
 vec3 _resolveDispersion(
     vec2 uvBase,
     vec2 childUVBase,
@@ -436,7 +437,7 @@ vec3 _resolveDispersion(
     return mix(vec3(luminanceNew), diff, float(LG_CA_SATURATION_BOOST));
 }
 
-// OPTIMIZED: Logic simplified (Boost removed), Mask/Normal redundant calculations removed
+// FIX: Renamed params to avoid macro collision (uThickness->thickness, etc)
 vec4 _calculateRefractionLayer(
     vec2 screenUV, vec3 normal, float signedDistance, float height, float thickness,
     float refractiveIndex, float chromaticAberration,
@@ -457,7 +458,6 @@ vec4 _calculateRefractionLayer(
     float baseHeight = thickness * 8.0;
     float refractLength = (height + baseHeight) / max(0.001, abs(refractVec.z));
     
-    // BOOST logic removed as requested.
     vec2 displacementPixels = refractVec.xy * refractLength;
     outRefractionDisplacement = displacementPixels / sizePixels;
     
@@ -521,7 +521,7 @@ vec4 _calculateRefractionLayer(
     return vec4(finalRGB, backgroundSample.a);
 }
 
-// OPTIMIZED: Uses precomputed masks and normalized vectors
+// FIX: Renamed params uThickness->thickness, uLightDirection->lightDirection, etc.
 vec3 _calculateTotalLighting(
     float signedDistance, float thickness,
     vec2 lightDirection, float lightIntensity, float ambientStrength,
@@ -585,6 +585,7 @@ float _computeTouchGlowMask(vec2 positionPixels, vec2 positionSdf, float insideO
     return outMask;
 }
 
+// FIX: Renamed params uSizePx->size, etc.
 vec4 _applyInteractiveGlow(
     vec4 coloredBase,
     vec4 refractColorBase,
@@ -594,7 +595,7 @@ vec4 _applyInteractiveGlow(
     vec2 position,
     float signedDistance,
     int shapeIndex,
-    vec2 uSizePx,
+    vec2 size,
     sampler2D backgroundTexture,
     sampler2D childTexture,
     vec3 lighting,
@@ -631,6 +632,11 @@ vec4 _applyInteractiveGlow(
 
     float effectiveLight = (tLight > -0.5) ? mix(lightness, tLight, shaped) : lightness;
     float effectiveSat = (tSat > -0.5)  ? mix(saturation, tSat, shaped) : saturation;
+    // ACHTUNG: uGlassColor hier ist ein Uniform und kollidiert mit der main definition,
+    // aber wir sind in einer Funktion. Wenn uGlassColor nicht als Parameter übergeben wurde,
+    // greift es auf das globale Uniform zu (was OK ist, solange kein #define uGlassColor... aktiv ist).
+    // ABER: Im main shader haben wir #define uGlassColor... NICHT gemacht (es ist ein vec4 Uniform).
+    // Warte, uGlassColor ist layout(location=1). Das ist kein Makro. Das ist sicher.
     vec4 effectiveGlass = mix(uGlassColor, tGlass, shaped);
 
     vec4 refractLocal = refractColorBase;
@@ -639,7 +645,7 @@ vec4 _applyInteractiveGlow(
     
     if (extraSigma > 0.01) {
         vec2 uvBase = screenUV + refractionDisplacement;
-        refractLocal = _blurApprox9(backgroundTexture, uvBase, extraSigma, uSizePx);
+        refractLocal = _blurApprox9(backgroundTexture, uvBase, extraSigma, size);
         vec4 childColor = _sampleTexture(childTexture, childUVBase + refractionDisplacement);
         refractLocal = mix(refractLocal, childColor, childColor.a);
     }
@@ -666,71 +672,85 @@ vec4 _applyInteractiveGlow(
     return mix(coloredBase, coloredLocal, shaped);
 }
 
+// FIX: Renamed ALL params to avoid collision with Macros in Main Shader
 vec4 renderLiquidGlass(
-    vec2 screenUV,
-    vec2 childUVBase,
-    vec2 position, vec2 uSizePx,
-    float signedDistance, float thickness,
-    float refractiveIndex, float chromaticAberration,
-    vec4 glassColor, vec2 lightDirection, float lightIntensity, float ambientStrength,
+    vec2 screenUV,              
+    vec2 childUVBase,           
+    vec2 position,              
+    vec2 size,                  
+    float signedDistance,       
+    float thickness,            
+    float refractiveIndex,      
+    float chromaticAberration,  
+    vec4 glassColor,            
+    vec2 lightDirection,        
+    float lightIntensity,       
+    float ambientStrength,      
     sampler2D backgroundTexture,
-    sampler2D childTexture,
-    vec3 normal, float foregroundAlpha,
-    float saturation, float lightness, float rimWidthPixels, float rimSharpness,
+    sampler2D childTexture,     
+    vec3 normal,
+    float foregroundAlpha,
+    float saturation,           
+    float lightness,            
+    float rimWidthPixels,       
+    float rimSharp,         
     int shapeIndex
 ) {
+    // 1. Background Sample
     vec4 backgroundColor = _sampleTexture(backgroundTexture, screenUV);
     
+    // 2. Early Exit (Safety)
     if (foregroundAlpha < 0.001 || thickness < 0.01) {
         return backgroundColor;
     }
 
-    // --- OPTIMIZATION: Compute Shared Geometry ONCE ---
+    // --- GEOMETRY PRE-CALCULATION ---
     float height = _calculateLiquidHeight(signedDistance, thickness);
     
-    // Calculate masks once, reuse in lighting functions
-    RimMasks masks = _calculateRimMasks(signedDistance, rimWidthPixels, rimSharpness);
+    // Rim Masks einmal berechnen (Performance)
+    RimMasks masks = _calculateRimMasks(signedDistance, rimWidthPixels, rimSharp);
     
-    // Calculate normalized normal once
+    // Normalisierung für Lighting cachen
     vec2 nXyNormalized = _safeNormalize(normal.xy);
-    // ------------------------------------------------
-
+    
+    // 3. Lighting Calculation
     vec3 lighting = _calculateTotalLighting(
         signedDistance, thickness,
         lightDirection, lightIntensity, ambientStrength,
         backgroundColor.rgb, rimWidthPixels, 
-        masks, nXyNormalized // Pass cached
+        masks, nXyNormalized 
     );
 
+    // 4. Refraction Layer
     vec2 refractionDisplacement;
     vec4 rawRefractionTexture;
     
     vec4 refractColorBase = _calculateRefractionLayer(
         screenUV, normal, signedDistance, height, thickness,
         refractiveIndex, chromaticAberration,
-        uSizePx, backgroundTexture,
+        size, backgroundTexture,
         childTexture, childUVBase,
         refractionDisplacement, rawRefractionTexture,
         shapeIndex,
         saturation, lightness, glassColor, lighting
     );
 
-    // Call to _applyRimHighlight removed as requested
-
+    // 5. Interactive Glow & Compositing
     vec4 outColor = _applyInteractiveGlow(
         refractColorBase, rawRefractionTexture, screenUV, refractionDisplacement, childUVBase,
-        position, signedDistance, shapeIndex, uSizePx, backgroundTexture, childTexture,
+        position, signedDistance, shapeIndex, size, backgroundTexture, childTexture,
         lighting, lightness, saturation, backgroundColor.rgb
     );
 
+    // 6. Alpha & Edge Blending
     float coverage = _computeCoverageAA(signedDistance);
     float baseAlpha = foregroundAlpha * coverage;
     
     float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
     float rimAlpha = masks.band * edgeAlphaGain;
+    
     float mixAlpha = clamp(max(baseAlpha, rimAlpha), 0.0, 1.0);
 
     return mix(backgroundColor, outColor, mixAlpha);
 }
-
 #endif
