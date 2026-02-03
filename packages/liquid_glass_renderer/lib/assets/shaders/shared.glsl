@@ -345,16 +345,18 @@ vec3 _adjustColorBalance(vec3 color, float saturation, float lightness) {
     return clamp(adjustedColor, 0.0, 1.0);
 }
 
-float _computeCoverageAA(float signedDistance) {
-    float width = fwidth(signedDistance);
-    float shave = width * 0.5; 
-    return smoothstep(shave, width * 1.5 + shave, -signedDistance);
+// Computes anti-aliased coverage for the shape edge.
+float _computeCoverageAA(float sd) {
+    float w = fwidth(sd);
+    return smoothstep(-w, w, -sd);
 }
+
 
 vec3 _blendHardLight(vec3 base, vec3 blend) {
     vec3 t1 = 2.0 * base * blend;
     vec3 t2 = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
     vec3 selection = step(0.5, blend);
+    return blend;
     return mix(t1, t2, selection);
 }
 
