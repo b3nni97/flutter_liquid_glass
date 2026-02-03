@@ -4,33 +4,30 @@
 precision mediump float;
 precision mediump int;
 
-// ───────────────────── Header ────────────────────────────────────────────────
-// Reihenfolge muss EXAKT mit liquid_glass.frag übereinstimmen!
-uniform vec2 uSize;
-uniform vec4 uGlassColor;
-uniform vec4 uOpticalProps; // x=RI, y=CA, z=thickness, w=blend
-uniform vec4 uLightConfig;
-uniform vec2 uColorAdjust;  // x=lightness, y=numShapes
-uniform vec2 uLightDirection;
-uniform mat4 uTransform;    // Wird ignoriert (Identity)
-uniform vec2 uRimParams;
+// ─── 1. Essential Properties (Compact Layout) ───
+uniform vec2 uSize;           // Index 0
+uniform vec4 uOpticalProps;   // Index 2 (Thickness, Blend für SDF nötig)
+uniform vec2 uColorAdjust;    // Index 6 (NumShapes für SDF nötig)
 
+// Indizes 10, 12, 14, ... entfallen hier (Licht, Farbe etc.)
+
+// ─── 2. Shape Data ───
 #define MAX_SHAPES 8
-// Stride: 7 floats
+// Start: Index 24 (8 + 16)
 uniform float uShapeData[MAX_SHAPES * 7];
 
-// ───────────────────── Blur Header ───────────────────────────────────────────
-uniform vec4 uBlurHeader;
+// ─── 3. Blur Settings ───
+// Start: Index 80 (24 + 56)
+uniform vec4 uBlurHeader;   
+
 #define u_dir_x        (uBlurHeader.x)
 #define u_dir_y        (uBlurHeader.y)
 #define u_sample_count (uBlurHeader.z)
 #define u_tile_mode    (uBlurHeader.w)
+// Start: Index 84
+uniform vec4 u_samples[24];   
 
-// Array-Größe: 24 (passend zu Dart & liquid_glass.frag)
-uniform vec4 u_samples[24];
-
-// ───────────────────── Texture / Output ────────────────────────────────────
-// Sampler zählen nicht zu den Float-Indizes
+// ─── Samplers ───
 uniform sampler2D uBackgroundTexture;
 
 out vec4 fragColor;
@@ -54,13 +51,6 @@ vec4 _sample_screen_clamped(vec2 uv) {
     return texture(uBackgroundTexture, clampedUV);
 }
 
-// Verhindert DCE (Dead Code Elimination) für ungenutzte Uniforms
-void _preserve_header_uniforms(vec2 uv){
-  if (uGlassColor.w > 2e9) fragColor += 0.001;
-  // uTransform anfassen, damit es nicht wegoptimiert wird
-  if (uTransform[0][0] > 2e9) fragColor += 0.001; 
-  if (uBlurHeader.w > 2e9) fragColor += 0.001;
-}
 
 // ───────────────────── 1D Blur Logic ───────────────────────────────────────
 vec4 _blur1D(vec2 baseUV){
@@ -97,8 +87,6 @@ void main(){
   #ifdef IMPELLER_TARGET_OPENGLES
   uv.y = 1.0 - uv.y;
   #endif
-
-  _preserve_header_uniforms(uv);
 
   vec2 p = pScreen; 
 

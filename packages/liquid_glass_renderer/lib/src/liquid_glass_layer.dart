@@ -335,6 +335,22 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _idxChildProjection = 350; // War 558
   static const int _idxChildSize = 354; // War 562
 
+  // ===========================================================================
+  // 2. BLUR SHADER INDICES (Compact Layout)
+  // ===========================================================================
+  // Wir entfernen: GlassColor(4), LightConfig(4), LightDir(2), Rim(2) = 12 Floats weniger VOR Shapes
+  // uSize (0) -> uOpticalProps (2) -> uColorAdjust (6) -> uTransform (8)
+
+  static const int _blurIdxOpticalProps = 2; // War 6
+  static const int _blurIdxColorAdjust = 6; // War 14
+
+  // Start Shapes: 8 + 16 (Transform) = 24
+  static const int _blurIdxShapeData = 8; // War 36
+
+  // 8 Shapes * 7 = 56.   24 + 56 = 80.
+  static const int _blurIdxHeader = 64;
+  static const int _blurIdxSamples = 68;
+
   // Config Update
   static const int _maxShapesPerLayer = 8; // Wichtig!
   static const int _maxTouchesPerLayer = 4; // Wichtig!
@@ -425,9 +441,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     if (_hInvariantsInitialized) return;
     // uBlurHeader: x=u_dir_x, y=u_dir_y, z=u_sample_count, w=u_tile_mode
     _blurH
-      ..setFloat(_blurBaseFloat + 0, 1.0) // dir.x (Horizontal)
-      ..setFloat(_blurBaseFloat + 1, 0.0) // dir.y
-      ..setFloat(_blurBaseFloat + 3, 0.0); // tile_mode = clamp
+      ..setFloat(_blurIdxHeader + 0, 1.0) // dir.x (Horizontal)
+      ..setFloat(_blurIdxHeader + 1, 0.0) // dir.y
+      ..setFloat(_blurIdxHeader + 3, 0.0); // tile_mode = clamp
     _hInvariantsInitialized = true;
   }
 
@@ -684,26 +700,27 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
     // Sync specific uniforms to H-Blur shader
     _blurH
-      ..setFloat(_idxOpticalProps + 0, _settings.refractiveIndex)
-      ..setFloat(_idxOpticalProps + 1, _settings.chromaticAberration)
-      ..setFloat(_idxOpticalProps + 2, thickness)
-      ..setFloat(_idxOpticalProps + 3, _settings.blend * _devicePixelRatio)
-      ..setFloat(_idxColorAdjust + 0, _settings.lightness)
-      ..setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
+      ..setFloat(_blurIdxOpticalProps + 0, _settings.refractiveIndex)
+      ..setFloat(_blurIdxOpticalProps + 1, _settings.chromaticAberration)
+      ..setFloat(_blurIdxOpticalProps + 2, thickness)
+      ..setFloat(_blurIdxOpticalProps + 3, _settings.blend * _devicePixelRatio)
+      ..setFloat(_blurIdxColorAdjust + 0, _settings.lightness)
+      ..setFloat(_blurIdxColorAdjust + 1, shapeCount.toDouble());
 
     // Upload Shapes
-    _uploadShapeData(_shader, shapeCount, shapes);
-    _uploadShapeData(_blurH, shapeCount, shapes);
+    _uploadShapeData(_shader, shapeCount, shapes, _shapeDataBaseFloat);
+    _uploadShapeData(_blurH, shapeCount, shapes, _blurIdxShapeData);
   }
 
   void _uploadShapeData(
     FragmentShader targetShader,
     int count,
     List<_ActiveShape> shapes,
+    int baseIndex, // <--- NEU
   ) {
     for (int i = 0; i < count; i++) {
       final RawShape shape = i < shapes.length ? shapes[i].$2 : RawShape.none;
-      final int base = _shapeDataBaseFloat + (i * _shapeStride);
+      final int base = baseIndex + (i * _shapeStride);
       targetShader
         ..setFloat(base + 0, shape.type.index.toDouble())
         ..setFloat(base + 1, shape.center.dx * _devicePixelRatio)
@@ -727,22 +744,21 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
     for (int i = 0; i < 16; i++) {
       _shader.setFloat(_idxTransform + i, storage[i]);
-      _blurH.setFloat(_idxTransform + i, storage[i]);
     }
   }
 
   void _updateShapeCount(int shapeCount) {
     if (_lastShapeCount != shapeCount) {
       _shader.setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
-      _blurH.setFloat(_idxColorAdjust + 1, shapeCount.toDouble());
+      _blurH.setFloat(_blurIdxColorAdjust + 1, shapeCount.toDouble());
     }
   }
 
   void _uploadBlurKernels(int nKernel, List<_PackedSample> kernel) {
     // H-Pass
-    _blurH.setFloat(_blurBaseFloat + 2, nKernel.toDouble());
+    _blurH.setFloat(_blurIdxHeader + 2, nKernel.toDouble());
     if (nKernel != _lastKernelCountH) {
-      int base = _blurSamplesFloat;
+      int base = _blurIdxSamples;
       for (int i = 0; i < nKernel; i++) {
         final _PackedSample s = kernel[i];
         _blurH
