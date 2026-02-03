@@ -15,7 +15,7 @@ uniform vec2 uLightDirection;
 uniform mat4 uTransform;    // Wird ignoriert (Identity)
 uniform vec2 uRimParams;
 
-#define MAX_SHAPES 16
+#define MAX_SHAPES 8
 // Stride: 7 floats
 uniform float uShapeData[MAX_SHAPES * 7];
 

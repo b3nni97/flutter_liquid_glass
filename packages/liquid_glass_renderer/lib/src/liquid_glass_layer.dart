@@ -280,42 +280,64 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _initHBlurInvariants();
   }
 
-  // --- Uniform Index Constants ---
-  // These must match the layout in `liquid_glass.frag` and `gauss1d_linear.frag`.
+// --- 1. Basic Properties ---
+  // Start: 0
+  // Länge: 36 Floats
+  static const int _idxGlassColor = 2;
+  static const int _idxOpticalProps = 6;
+  static const int _idxLightConfig = 10;
+  static const int _idxColorAdjust = 14;
+  static const int _idxLightDir = 16;
+  static const int _idxTransform = 18;
+  static const int _idxRimParams = 34;
 
-  static const int _idxGlassColor = 2; // vec4
-  static const int _idxOpticalProps = 6; // vec4
-  static const int _idxLightConfig = 10; // vec4
-  static const int _idxColorAdjust = 14; // vec4 (x: lightness, y: numShapes)
-  static const int _idxLightDir = 16; // vec2
-  static const int _idxTransform = 18; // mat4
-  static const int _idxRimParams = 34; // vec2
-
-  static const int _shapeDataBaseFloat = 36; // uShapeData[]
+  // --- 2. Shape Data ---
+  // Start: 36 (34 + 2)
+  // Neu: 8 Shapes * 7 Floats = 56 Floats
+  static const int _shapeDataBaseFloat = 36;
   static const int _shapeStride = 7;
+  // Ende ShapeBlock: 36 + 56 = 92
 
-  // Blur Shader Header
-  static const int _blurBaseFloat = 148; // uBlurHeader (vec4)
-  static const int _blurSamplesFloat = 152; // u_samples[]
+  // --- 3. Blur Settings ---
+  // Start: 92
+  // Länge: 4 + 96 = 100 Floats
+  static const int _blurBaseFloat = 92; // War 148
+  static const int _blurSamplesFloat = 96; // War 152
+  // Ende BlurBlock: 92 + 100 = 192
 
-  // Touch & Glow
-  static const int _idxTouchCount = 248;
-  static const int _idxTouches = 249; // 8 * vec4
-  static const int _idxTouchOwners = 281; // float[8]
+  // --- 4. Touch Handling ---
+  // Start: 192
+  static const int _idxTouchCount = 192; // War 248
 
-// NEU: Inserted after TouchOwners (393)
-  static const int _idxGlobalBlurSigma = 289; // float -> Ends at 394
-  static const int _idxTouchGlowStrengths = 290; // float[8] -> Ends at 402
-  static const int _idxShapeGlowData =
-      298; // vec4 array [MAX_SHAPES * 3] -> Ends at 594
+  // uTouches: 4 * 4 = 16 Floats
+  static const int _idxTouches = 193; // War 249
 
-  // Projection & Environment (Shifted by new data)
-  static const int _idxBgScale = 554;
-  static const int _idxNormalParams = 556;
-  static const int _idxChildProjection = 558;
-  static const int _idxChildSize = 562;
+  // uTouchOwners: 4 * 1 = 4 Floats (Startet bei 193 + 16)
+  static const int _idxTouchOwners = 209; // War 281
+  // Ende TouchBlock: 209 + 4 = 213
 
-  static const int _maxShapesPerLayer = 16;
+  // --- 5. Glow & Overrides ---
+  // Start: 213
+  static const int _idxGlobalBlurSigma = 213; // War 289
+
+  // uTouchGlowStrengths: 4 * 1 = 4 Floats
+  static const int _idxTouchGlowStrengths = 214; // War 290
+
+  // uShapeGlowData: 8 Shapes * 4 vec4s * 4 floats = 128 Floats
+  // Startet bei 214 + 4
+  static const int _idxShapeGlowData = 218; // War 298
+  // Ende GlowBlock: 218 + 128 = 346
+
+  // --- 6. Projection & Environment ---
+  // Start: 346
+  static const int _idxBgScale = 346; // War 554
+  static const int _idxNormalParams = 348; // War 556
+  static const int _idxChildProjection = 350; // War 558
+  static const int _idxChildSize = 354; // War 562
+
+  // Config Update
+  static const int _maxShapesPerLayer = 8; // Wichtig!
+  static const int _maxTouchesPerLayer = 4; // Wichtig!
   static const double _epsilon = 0.01;
 
   final LayerHandle<BackdropFilterLayer> _backdropHandle =
@@ -762,7 +784,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     _shader.setFloat(_idxTouchCount, nTouches.toDouble());
 
     // Upload touches
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < _maxTouchesPerLayer; i++) {
       final int base = _idxTouches + (i * 4);
       if (i < nTouches) {
         final _OwnedTouch tp = ownedTouches[i];
@@ -782,7 +804,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
     }
 
     // Upload owners and strengths
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < _maxTouchesPerLayer; i++) {
       final double owner =
           (i < nTouches) ? ownedTouches[i].ownerIndex.toDouble() : -1.0;
       _shader.setFloat(_idxTouchOwners + i, owner);
