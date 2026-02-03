@@ -161,7 +161,7 @@ vec4 _applyGaussianBlur(sampler2D tex, vec2 baseUV) {
     int sampleCount = int(sampleCountRaw + 0.5);
 
     // UNROLLED LOGIC / BRANCH REMOVAL
-    for (int i = 0; i < 50; ++i) {
+    for (int i = 0; i < 24; ++i) {
         if (i >= sampleCount) break;
         
         float t = u_samples[i].x;

@@ -1,53 +1,53 @@
-#version 320 es
+#version 460 core
+#include <flutter/runtime_effect.glsl>
 
 precision mediump float;
 precision mediump int;
 
-#include <flutter/runtime_effect.glsl>
+// ─── 1. Basic Properties ───
+// Indizes werden implizit durch Reihenfolge bestimmt (Start: 0)
+uniform vec2 uSize;           // 2 Floats
+uniform vec4 uGlassColor;     // 4 Floats
+uniform vec4 uOpticalProps;   // 4 Floats
+uniform vec4 uLightConfig;    // 4 Floats
+uniform vec2 uColorAdjust;    // 2 Floats
+uniform vec2 uLightDirection; // 2 Floats
+uniform mat4 uTransform;      // 16 Floats (4x4 Matrix)
+uniform vec2 uRimParams;      // 2 Floats
 
-// -----------------------------------------------------------------------------
-// Uniform Layouts
-// -----------------------------------------------------------------------------
-
-// Basic Props
-layout(location = 0) uniform vec2 uSize;
-layout(location = 1) uniform vec4 uGlassColor;
-layout(location = 2) uniform vec4 uOpticalProps;
-layout(location = 3) uniform vec4 uLightConfig;
-layout(location = 4) uniform vec2 uColorAdjust;
-layout(location = 5) uniform vec2 uLightDirection;
-layout(location = 6) uniform mat4 uTransform;
-layout(location = 10) uniform vec2 uRimParams;
-
-// Shapes
+// ─── 2. Shape Data ───
 #define MAX_SHAPES 16
-layout(location = 11) uniform float uShapeData[MAX_SHAPES * 7];
+// float array[112] (16 * 7)
+uniform float uShapeData[MAX_SHAPES * 7];
 
-// Blur
-layout(location = 123) uniform vec4 uBlurHeader;
-layout(location = 124) uniform vec4 u_samples[50];
+// ─── 3. Blur Settings ───
+uniform vec4 uBlurHeader;     // 4 Floats
+// vec4 array[24] -> 24 * 4 = 96 Floats
+uniform vec4 u_samples[24];   
 
-// Touches
+// ─── 4. Touch Handling ───
 #define MAX_TOUCHES 8
-layout(location = 324) uniform float uTouchCount_f;
-layout(location = 325) uniform vec4 uTouches[MAX_TOUCHES];
-layout(location = 333) uniform float uTouchOwners[MAX_TOUCHES];
+uniform float uTouchCount_f;             // 1 Float
+uniform vec4 uTouches[MAX_TOUCHES];      // 8 * 4 = 32 Floats
+uniform float uTouchOwners[MAX_TOUCHES]; // 8 * 1 = 8 Floats
 
-// --- Glow & Overrides ---
-layout(location = 341) uniform float uGlobalBlurSigma;
-layout(location = 342) uniform float uTouchGlowStrengths[MAX_TOUCHES];
-layout(location = 350) uniform vec4 uShapeGlowData[MAX_SHAPES * 4];
+// ─── 5. Glow & Overrides ───
+uniform float uGlobalBlurSigma;                     // 1 Float
+uniform float uTouchGlowStrengths[MAX_TOUCHES];     // 8 * 1 = 8 Floats
+// vec4 array[64] -> 16 * 4 = 64 vec4s -> 256 Floats
+uniform vec4 uShapeGlowData[MAX_SHAPES * 4]; 
 
-// --- Projection & Environment ---
-layout(location = 414) uniform vec2 uBgScale;
-layout(location = 416) uniform vec2 uNormalParams;
-layout(location = 418) uniform vec4 uChildProjection;
-layout(location = 422) uniform vec2 uChildSize;
+// ─── 6. Projection & Environment ───
+uniform vec2 uBgScale;         // 2 Floats
+uniform vec2 uNormalParams;    // 2 Floats
+uniform vec4 uChildProjection; // 4 Floats
+uniform vec2 uChildSize;       // 2 Floats
 
-uniform sampler2D uBackgroundTexture;
-uniform sampler2D uBackgroundChildTexture;
+// ─── Samplers (Zählen NICHT in die Float-Indizes) ───
+uniform sampler2D uBackgroundTexture;      // Index 0 für setImageSampler
+uniform sampler2D uBackgroundChildTexture; // Index 1 für setImageSampler
 
-layout(location = 0) out vec4 fragColor;
+out vec4 fragColor;
 
 // -----------------------------------------------------------------------------
 // Optimization: Zero-Cost Macros instead of Variables

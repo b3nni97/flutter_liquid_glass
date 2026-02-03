@@ -299,21 +299,21 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _blurSamplesFloat = 152; // u_samples[]
 
   // Touch & Glow
-  static const int _idxTouchCount = 352;
-  static const int _idxTouches = 353; // 8 * vec4
-  static const int _idxTouchOwners = 385; // float[8]
+  static const int _idxTouchCount = 248;
+  static const int _idxTouches = 249; // 8 * vec4
+  static const int _idxTouchOwners = 281; // float[8]
 
 // NEU: Inserted after TouchOwners (393)
-  static const int _idxGlobalBlurSigma = 393; // float -> Ends at 394
-  static const int _idxTouchGlowStrengths = 394; // float[8] -> Ends at 402
+  static const int _idxGlobalBlurSigma = 289; // float -> Ends at 394
+  static const int _idxTouchGlowStrengths = 290; // float[8] -> Ends at 402
   static const int _idxShapeGlowData =
-      402; // vec4 array [MAX_SHAPES * 3] -> Ends at 594
+      298; // vec4 array [MAX_SHAPES * 3] -> Ends at 594
 
   // Projection & Environment (Shifted by new data)
-  static const int _idxBgScale = 658;
-  static const int _idxNormalParams = 660;
-  static const int _idxChildProjection = 662;
-  static const int _idxChildSize = 666;
+  static const int _idxBgScale = 554;
+  static const int _idxNormalParams = 556;
+  static const int _idxChildProjection = 558;
+  static const int _idxChildSize = 562;
 
   static const int _maxShapesPerLayer = 16;
   static const double _epsilon = 0.01;
@@ -1055,7 +1055,7 @@ class _OwnedTouch {
 
 /// Helper class to generate packed Gaussian kernels for Impeller shaders.
 class _GaussianKernelGenerator {
-  static const int maxKernelSize = 50;
+  static const int maxKernelSize = 24;
   static const double _maxSigma = 500.0;
   static const double _sqrt3 = 1.7320508075688772;
 

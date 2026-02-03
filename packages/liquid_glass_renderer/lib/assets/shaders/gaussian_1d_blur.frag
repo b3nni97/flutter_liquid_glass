@@ -1,38 +1,39 @@
-// gaussian_1d_blur.frag — FINAL (Updated for 7-float stride)
-// H/V 1D Blur (index-stabil, liquid_glass.frag-kompatibel)
-
-#version 320 es
+#version 460 core
 #include <flutter/runtime_effect.glsl>
+
 precision mediump float;
 precision mediump int;
 
 // ───────────────────── Header ────────────────────────────────────────────────
-layout(location = 0)  uniform vec2 uSize;
-layout(location = 1)  uniform vec4 uGlassColor;
-layout(location = 2)  uniform vec4 uOpticalProps; // x=RI, y=CA, z=thickness, w=blend
-layout(location = 3)  uniform vec4 uLightConfig;
-layout(location = 4)  uniform vec2 uColorAdjust;  // x=lightness, y=numShapes
-layout(location = 5)  uniform vec2 uLightDirection;
-layout(location = 6)  uniform mat4 uTransform;    // Wird ignoriert (Identity)
-layout(location = 10) uniform vec2 uRimParams;
+// Reihenfolge muss EXAKT mit liquid_glass.frag übereinstimmen!
+uniform vec2 uSize;
+uniform vec4 uGlassColor;
+uniform vec4 uOpticalProps; // x=RI, y=CA, z=thickness, w=blend
+uniform vec4 uLightConfig;
+uniform vec2 uColorAdjust;  // x=lightness, y=numShapes
+uniform vec2 uLightDirection;
+uniform mat4 uTransform;    // Wird ignoriert (Identity)
+uniform vec2 uRimParams;
 
 #define MAX_SHAPES 16
-// UPDATE: Stride is now 7 floats
-layout(location = 11) uniform float uShapeData[MAX_SHAPES * 7];
+// Stride: 7 floats
+uniform float uShapeData[MAX_SHAPES * 7];
 
 // ───────────────────── Blur Header ───────────────────────────────────────────
-// UPDATE: Shifted location 107 -> 123 (+16)
-layout(location = 123) uniform vec4 uBlurHeader;
+uniform vec4 uBlurHeader;
 #define u_dir_x        (uBlurHeader.x)
 #define u_dir_y        (uBlurHeader.y)
 #define u_sample_count (uBlurHeader.z)
 #define u_tile_mode    (uBlurHeader.w)
 
-layout(location = 124) uniform vec4 u_samples[50];
+// Array-Größe: 24 (passend zu Dart & liquid_glass.frag)
+uniform vec4 u_samples[24];
 
 // ───────────────────── Texture / Output ────────────────────────────────────
+// Sampler zählen nicht zu den Float-Indizes
 uniform sampler2D uBackgroundTexture;
-layout(location = 0) out vec4 fragColor;
+
+out vec4 fragColor;
 
 // ───────────────────── DEFINES (Fix für Includes) ────────────────────────────
 // WICHTIG: #define statt float, damit das Include die Werte sieht.
@@ -74,7 +75,7 @@ vec4 _blur1D(vec2 baseUV){
   vec4 sum = vec4(0.0);
   
   // UNROLL FRIENDLY LOOP
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < 24; ++i) {
     if (i >= nS) break;
     float t = u_samples[i].x;
     float w = u_samples[i].z;
