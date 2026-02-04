@@ -44,3 +44,4 @@ flutter:
     - lib/assets/shaders/liquid_glass.frag
     # - lib/assets/shaders/liquid_glass_arbitrary.frag
     - lib/assets/shaders/gaussian_1d_blur.frag
+    - lib/assets/shaders/blend_mask.frag
