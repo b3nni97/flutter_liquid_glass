@@ -44,6 +44,8 @@ uniform vec2 uNormalParams;    // 2
 uniform vec4 uChildProjection; // 4
 uniform vec2 uChildSize;       // 2
 
+uniform vec3 uKeyColor;
+
 uniform sampler2D uBackgroundTexture;
 uniform sampler2D uBackgroundChildTexture;
 
@@ -198,6 +200,7 @@ void main() {
         uLightDirection,
         uLightIntensity,
         uAmbientStrength,
+        uKeyColor,
         uBackgroundTexture,
         uBackgroundChildTexture,
         normal,

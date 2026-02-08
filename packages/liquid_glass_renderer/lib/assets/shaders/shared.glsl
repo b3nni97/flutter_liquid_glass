@@ -352,13 +352,58 @@ float _computeCoverageAA(float sd) {
 }
 
 
+
+// vec3 _blendHardLight(vec3 base, vec3 blend) {
+//     vec3 t1 = 2.0 * base * blend;
+//     vec3 t2 = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
+//     vec3 selection = step(0.5, blend);
+//     return mix(t1, t2, selection);
+// }
+
 vec3 _blendHardLight(vec3 base, vec3 blend) {
-    vec3 t1 = 2.0 * base * blend;
-    vec3 t2 = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
+   // ---------------------------------------------------------
+    // WERKSTATT 1: DARK MODE (Bleibt 100% gleich)
+    // ---------------------------------------------------------
+    vec3 darkBlend = blend;
+
+    float greenIntensity = smoothstep(0.3, 1.0, base.g);
+    float greenFactor = mix(1.0, 0.71, greenIntensity); 
+    darkBlend.g = blend.g * greenFactor;
+
+    // Dieser Boost hier gilt nur für den Dark Mode (Screen-Formel)
+    float redIntensityDark = smoothstep(0.7, 0.95, base.r); 
+    darkBlend.r = mix(darkBlend.r, 1.0, redIntensityDark);
+
+    float greenBgStrong = smoothstep(0.5, 1.0, base.g);
+    darkBlend.r = darkBlend.r * mix(1.0, 0.96, greenBgStrong);
+
+
+    // ---------------------------------------------------------
+    // WERKSTATT 2: LIGHT MODE (Smarter Fix)
+    // ---------------------------------------------------------
+    vec3 lightBlend = blend;
+
+    // WICHTIG: Neue Erkennung! 
+    // Wir prüfen: Ist Rot dominanter als Grün?
+    // Orange HG: R=1.0, G=0.6 -> Diff 0.4 -> Boost Aktiv
+    // Grauer HG: R=0.9, G=0.9 -> Diff 0.0 -> Boost Inaktiv
+    float isRedBackground = smoothstep(0.1, 0.3, base.r - base.g);
+
+    // Wir boosten Rot um 10-15%, aber NUR wenn es wirklich ein roter Hintergrund ist.
+    float lightRedBoost = mix(1.0, 1.08, isRedBackground); 
+    lightBlend.r = lightBlend.r * lightRedBoost;
+
+
+    // ---------------------------------------------------------
+    // BERECHNUNG
+    // ---------------------------------------------------------
+    vec3 t1 = 2.0 * base * lightBlend;
+    vec3 t2 = 1.0 - 2.0 * (1.0 - base) * (1.0 - darkBlend);
+    
     vec3 selection = step(0.5, blend);
-    return blend;
     return mix(t1, t2, selection);
 }
+
 
 // FIX: renamed params uGlassColor -> glassColor, uSaturation -> saturation, uLightness -> lightness
 vec3 _resolveDispersion(
@@ -373,7 +418,8 @@ vec3 _resolveDispersion(
     vec4 baseColor, 
     float saturation,
     float lightness,
-    vec4 glassColor
+    vec4 glassColor,
+    float isIcon // <--- NEU
 ) {
     float type, radius;
     vec2 centerSdf, sizeSdf;
@@ -420,15 +466,25 @@ vec3 _resolveDispersion(
     if (sampleRedChild.a <= 0.001) sampleRedChild = sampleGreenChild;
     if (sampleBlueChild.a <= 0.001) sampleBlueChild = sampleGreenChild;
 
+    // Un-Premultiply (sicher)
     vec3 colorRed = (sampleRedChild.a > 0.001) ? sampleRedChild.rgb / sampleRedChild.a : sampleRedChild.rgb;
     vec3 colorBlue = (sampleBlueChild.a > 0.001) ? sampleBlueChild.rgb / sampleBlueChild.a : sampleBlueChild.rgb;
     
+    // --- RED CHANNEL ---
     vec3 hardLightRed = _blendHardLight(sampleRedBg.rgb, colorRed);
-    float redComponent = mix(sampleRedBg.r, hardLightRed.r, sampleRedChild.a);
+    // Wenn Foto -> nimm colorRed (Original). Wenn Icon -> nimm hardLightRed (Glas).
+    vec3 targetRed = mix(colorRed, hardLightRed, isIcon);
+    
+    float redComponent = mix(sampleRedBg.r, targetRed.r, sampleRedChild.a);
 
+    // --- BLUE CHANNEL ---
     vec3 hardLightBlue = _blendHardLight(sampleBlueBg.rgb, colorBlue);
-    float blueComponent = mix(sampleBlueBg.b, hardLightBlue.b, sampleBlueChild.a);
+    // Wenn Foto -> nimm colorBlue (Original). Wenn Icon -> nimm hardLightBlue (Glas).
+    vec3 targetBlue = mix(colorBlue, hardLightBlue, isIcon);
+    
+    float blueComponent = mix(sampleBlueBg.b, targetBlue.b, sampleBlueChild.a);
 
+    // Green bleibt Base (Mitte)
     float greenComponent = baseColor.g; 
 
     vec3 spectralNew = vec3(redComponent, greenComponent, blueComponent);
@@ -446,6 +502,7 @@ vec4 _calculateRefractionLayer(
     vec2 sizePixels, sampler2D backgroundTexture,
     sampler2D childTexture,
     vec2 childUVBase,
+    vec3 keyColor,
     out vec2 outRefractionDisplacement,
     out vec4 outRawTexture,
     int shapeIndex,
@@ -454,10 +511,12 @@ vec4 _calculateRefractionLayer(
     vec4 glassColor, vec3 lighting
 ) {
     vec3 incident = vec3(0.0, 0.0, -1.0);
+    // max() verhindert Division durch 0 bei Brechungsindex, ohne Branching
     float n = max(refractiveIndex, 1.0001);
     vec3 refractVec = refract(incident, normal, 1.0 / n);
     
     float baseHeight = thickness * 8.0;
+    // abs() ist sehr schnell auf GPUs
     float refractLength = (height + baseHeight) / max(0.001, abs(refractVec.z));
     
     vec2 displacementPixels = refractVec.xy * refractLength;
@@ -466,29 +525,61 @@ vec4 _calculateRefractionLayer(
     vec2 uvBase = screenUV + outRefractionDisplacement;
     vec2 uvChild = childUVBase + outRefractionDisplacement;
 
+    // fwidth ist Hardware-implementiert und sehr schnell
     float stretch = length(fwidth(displacementPixels));
     float blurRadius = clamp(stretch * 0.45, 0.0, 6.0);
 
     // 1. Base Background Sample
     vec4 backgroundSample = _applyGaussianBlur(backgroundTexture, uvBase);
-    
     outRawTexture = backgroundSample;
 
     backgroundSample = _blendGlassTint(backgroundSample, glassColor);
     backgroundSample.rgb += lighting;
     backgroundSample.rgb = _adjustColorBalance(backgroundSample.rgb, saturation, lightness);
     
-    // 2. Child Sample & Blend
+    // -------------------------------------------------------------------------
+    // 2. Child Sample & COLOR KEYING (Optimized)
+    // -------------------------------------------------------------------------
+    
     vec4 childSample = _blurJitterRefraction(childTexture, uvChild, blurRadius, sizePixels, uvChild);
     
-    vec3 childRGB = (childSample.a > 0.001) ? childSample.rgb / childSample.a : childSample.rgb;
-    vec3 blended = _blendHardLight(backgroundSample.rgb, childRGB);
+    // OPTIMIERUNG: Branchless Un-Premultiply
+    // Anstatt if/else nutzen wir max(), um Division durch 0 zu verhindern.
+    // Das ist ein konstanter Rechenpfad für die GPU.
+    vec3 childRGB = childSample.rgb / max(childSample.a, 1.0e-4);
+
+    // --- KEYING LOGIC (Vectorized) ---
+    // abs() auf vec3 ist sehr effizient (Single Cycle)
+    vec3 diffVec = abs(childRGB - keyColor);
+    // max() Kette ist billig
+    float diff = max(diffVec.r, max(diffVec.g, diffVec.b));
     
-    backgroundSample.rgb = mix(backgroundSample.rgb, blended, childSample.a);
+    // smoothstep wird auf der GPU in Hardware berechnet -> sehr schnell
+    // Ergebnis: 1.0 = Icon (Glas), 0.0 = Bild (Normal)
+    float isIcon = 1.0 - smoothstep(0.01, 0.04, diff);
+
+    // vec3 debugColor = mix(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), isIcon);
     
+    // // Alpha auf 1.0 setzen, damit wir es deutlich sehen, 
+    // // oder childSample.a nutzen um die Form beizubehalten.
+    // return vec4(debugColor, 1.0); 
+    
+    // ---------------------------------
+
+    // Wir berechnen den Glas-Blend immer (kein 'if'), da Pipelining schneller ist als Branching
+    vec3 blendedRGB = _blendHardLight(backgroundSample.rgb, childRGB);
+    
+    // mix() (Linear Interpolation) ist extrem optimiert auf GPUs
+    vec3 finalBlend = mix(childRGB, blendedRGB, isIcon);
+    
+    // In den Hintergrund mischen
+    backgroundSample.rgb = mix(backgroundSample.rgb, finalBlend, childSample.a);
+    
+    // -------------------------------------------------------------------------
+
     float ca = max(chromaticAberration, 0.0);
     
-    // Aggressive Early Exit for CA
+    // Dieser Branch ist okay, da er oft kohärent für den ganzen Screen ist
     if (ca <= 0.005) {
         return vec4(clamp(backgroundSample.rgb, 0.0, 1.0), backgroundSample.a);
     }
@@ -506,16 +597,21 @@ vec4 _calculateRefractionLayer(
     baseAA.rgb += lighting;
     baseAA.rgb = _adjustColorBalance(baseAA.rgb, saturation, lightness);
     
-    vec3 blendedAA = _blendHardLight(baseAA.rgb, childRGB);
-    backgroundSample = vec4(mix(baseAA.rgb, blendedAA, childSample.a), baseAA.a);
+    // Auch im CA Pfad: Keying Logik anwenden (Code Reuse durch GPU Compiler)
+    vec3 glassAA = _blendHardLight(baseAA.rgb, childRGB);
+    vec3 finalAA = mix(childRGB, glassAA, isIcon);
+
+    backgroundSample = vec4(mix(baseAA.rgb, finalAA, childSample.a), baseAA.a);
 
     vec3 diffNew = _resolveDispersion(
         uvBase, childUVBase, outRefractionDisplacement, sizePixels,
         backgroundTexture, childTexture, shapeIndex, ca, backgroundSample,
-        saturation, lightness, glassColor
+        saturation, lightness, glassColor, isIcon
     );
 
     float caMixNew = clamp(float(LG_CA_OPACITY), 0.0, 1.0);
+    
+    // fwidth ist hier wichtig für Anti-Aliasing am Rand
     float edgeAA = smoothstep(-float(LG_CA_EDGE_FEATHER_PX) * fwidth(signedDistance), 0.0, -signedDistance);
     caMixNew *= edgeAA;
     
@@ -687,7 +783,8 @@ vec4 renderLiquidGlass(
     vec4 glassColor,            
     vec2 lightDirection,        
     float lightIntensity,       
-    float ambientStrength,      
+    float ambientStrength,
+    vec3 keyColor,      
     sampler2D backgroundTexture,
     sampler2D childTexture,     
     vec3 normal,
@@ -731,7 +828,7 @@ vec4 renderLiquidGlass(
         screenUV, normal, signedDistance, height, thickness,
         refractiveIndex, chromaticAberration,
         size, backgroundTexture,
-        childTexture, childUVBase,
+        childTexture, childUVBase, keyColor,
         refractionDisplacement, rawRefractionTexture,
         shapeIndex,
         saturation, lightness, glassColor, lighting

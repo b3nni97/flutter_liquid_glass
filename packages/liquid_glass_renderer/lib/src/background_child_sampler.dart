@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
 /// A callback for the [BackgroundChildSampler] widget.
-typedef SamplerBuilder = void Function(ui.Image image);
+typedef SamplerBuilder = void Function(ui.Image image, Color keyColor);
 
 /// A builder that returns a [LiquidGlassBackgroundInterface].
 typedef LiquidGlassBackgroundChildBuilder = LiquidGlassBackgroundInterface
@@ -16,6 +16,11 @@ typedef LiquidGlassBackgroundChildBuilder = LiquidGlassBackgroundInterface
 abstract class LiquidGlassBackgroundInterface implements Widget {
   /// The target size of the texture to be generated.
   Size get textureSize;
+
+  /// The color acting as the "Green Screen" key.
+  /// Pixels matching this color will be rendered with hardLight blend mode (Glass Effect),
+  /// while other colors will be rendered normally (Image Mode).
+  Color get keyColor;
 }
 
 /// A specialized sampler that captures its child as a texture while handling
@@ -46,10 +51,14 @@ class BackgroundChildSampler extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
+        // Wir bauen das Child hier, um auf die keyColor zugreifen zu können
+        final LiquidGlassBackgroundInterface childWidget = builder(context);
+
         return _ShaderSamplerBuilder(
           sampler: sampler,
           enabled: enabled,
-          child: builder(context),
+          keyColor: childWidget.keyColor, // Weiterreichen
+          child: childWidget,
         );
       },
     );
@@ -60,11 +69,13 @@ class _ShaderSamplerBuilder extends SingleChildRenderObjectWidget {
   const _ShaderSamplerBuilder({
     required this.sampler,
     required this.enabled,
+    required this.keyColor, // Neu
     required LiquidGlassBackgroundInterface super.child,
   });
 
   final SamplerBuilder sampler;
   final bool enabled;
+  final Color keyColor; // Neu
 
   @override
   RenderObject createRenderObject(BuildContext context) {
@@ -75,6 +86,7 @@ class _ShaderSamplerBuilder extends SingleChildRenderObjectWidget {
       sampler: sampler,
       enabled: enabled,
       textureSize: interfaceChild.textureSize,
+      keyColor: keyColor, // Weiterreichen
     );
   }
 
@@ -87,7 +99,8 @@ class _ShaderSamplerBuilder extends SingleChildRenderObjectWidget {
       ..devicePixelRatio = MediaQuery.of(context).devicePixelRatio
       ..sampler = sampler
       ..enabled = enabled
-      ..textureSize = interfaceChild.textureSize;
+      ..textureSize = interfaceChild.textureSize
+      ..keyColor = keyColor; // Weiterreichen
   }
 }
 
@@ -97,10 +110,12 @@ class _RenderShaderSamplerBuilderWidget extends RenderProxyBox {
     required SamplerBuilder sampler,
     required bool enabled,
     required Size textureSize,
+    required Color keyColor, // Neu
   })  : _devicePixelRatio = devicePixelRatio,
         _sampler = sampler,
         _enabled = enabled,
-        _textureSize = textureSize;
+        _textureSize = textureSize,
+        _keyColor = keyColor;
 
   double _devicePixelRatio;
   double get devicePixelRatio => _devicePixelRatio;
@@ -143,6 +158,17 @@ class _RenderShaderSamplerBuilderWidget extends RenderProxyBox {
     markNeedsCompositedLayerUpdate();
   }
 
+  // Neu: KeyColor Setter
+  Color _keyColor;
+  Color get keyColor => _keyColor;
+  set keyColor(Color value) {
+    if (_keyColor == value) {
+      return;
+    }
+    _keyColor = value;
+    markNeedsCompositedLayerUpdate();
+  }
+
   @override
   bool get alwaysNeedsCompositing => enabled;
 
@@ -158,7 +184,8 @@ class _RenderShaderSamplerBuilderWidget extends RenderProxyBox {
       ..callback = sampler
       ..size = size
       ..devicePixelRatio = devicePixelRatio
-      ..textureSize = textureSize;
+      ..textureSize = textureSize
+      ..keyColor = keyColor; // An Layer übergeben
     return layer;
   }
 
@@ -216,6 +243,17 @@ class _ShaderSamplerBuilderLayer extends OffsetLayer {
     markNeedsAddToScene();
   }
 
+  // Neu: KeyColor im Layer
+  Color _keyColor = const Color(0xFFFFFFFF);
+  Color get keyColor => _keyColor;
+  set keyColor(Color value) {
+    if (_keyColor == value) {
+      return;
+    }
+    _keyColor = value;
+    markNeedsAddToScene();
+  }
+
   @override
   void addToScene(ui.SceneBuilder builder) {
     if (size.isEmpty) {
@@ -227,7 +265,7 @@ class _ShaderSamplerBuilderLayer extends OffsetLayer {
     try {
       // Pass the captured image to the consumer (Shader).
       // The Shader typically maps UVs based on the virtual size vs texture size.
-      callback(image);
+      callback(image, keyColor);
     } finally {
       image.dispose();
     }

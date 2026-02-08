@@ -124,7 +124,7 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
         fit: StackFit.passthrough,
         children: <Widget>[
           BackgroundChildSampler(
-            (ui.Image image) => _reflectionImageHolder.update(image),
+            _reflectionImageHolder.update,
             builder: widget.backgroundChildBuilder!,
           ),
           layerContent,
@@ -143,9 +143,13 @@ class _ImageHolder {
   ui.Image? _image;
   ui.Image? get image => _image;
 
-  void update(ui.Image newImage) {
+  Color _keyColor = const Color(0xFFFFFFFF); // Standard Weiß
+  Color get keyColor => _keyColor;
+
+  void update(ui.Image newImage, Color newKeyColor) {
     _image?.dispose();
     _image = newImage.clone();
+    _keyColor = newKeyColor;
   }
 
   void dispose() {
@@ -265,6 +269,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   static const int _idxChildProjection = 350;
   static const int _idxChildSize = 354;
 
+  // Blending color key
+  static const int _idxKeyColor = 356;
+
   // ===========================================================================
   // 2. BLUR SHADER INDICES (Ultra Compact Layout)
   // ===========================================================================
@@ -309,6 +316,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   int _lastTextureWidth = -1;
   int _lastTextureHeight = -1;
   double _lastDPR = -1;
+  Color? _lastUploadedKeyColor;
 
   // Touch State Copy for diffing
   final List<_OwnedTouch> _lastUploadedTouches = [];
@@ -634,6 +642,19 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
   // --- Upload Implementations ---
 
+  void _uploadKeyColorUniform() {
+    final Color target = _imageHolder.keyColor;
+
+    // Performance Check: Nur hochladen, wenn geändert
+    if (_lastUploadedKeyColor == target) return;
+    _shader
+      ..setFloat(_idxKeyColor + 0, target.red / 255.0)
+      ..setFloat(_idxKeyColor + 1, target.green / 255.0)
+      ..setFloat(_idxKeyColor + 2, target.blue / 255.0);
+
+    _lastUploadedKeyColor = target;
+  }
+
   void _uploadProjectionUniforms(
       Rect bounds, Offset offset, int texW, int texH) {
     final double dpr = _devicePixelRatio;
@@ -784,7 +805,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
     if (nKernel != _lastKernelCountV) {
       // Main Shader has distinct blur offset
-      int baseV = 96;
+      int baseV = _idxBlurSamples;
 
       for (int i = 0; i < nKernel; i++) {
         final _PackedSample s = kernel[i];
@@ -932,6 +953,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
       bounds: clipBounds,
       offset: offset,
     );
+
+    _uploadKeyColorUniform();
 
     if (_imageHolder.image != null) {
       try {
