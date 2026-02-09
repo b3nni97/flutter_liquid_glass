@@ -4,60 +4,100 @@
 precision mediump float;
 precision mediump int;
 
-// ─── 1. Basic Properties (36 Floats total) ───
-uniform vec2 uSize;           // 2
-uniform vec4 uGlassColor;     // 4
-uniform vec4 uOpticalProps;   // 4
-uniform vec4 uLightConfig;    // 4
-uniform vec2 uColorAdjust;    // 2
-uniform vec2 uLightDirection; // 2
-uniform mat4 uTransform;      // 16
-uniform vec2 uRimParams;      // 2
+/// The dimensions of the drawing area in physical pixels.
+uniform vec2 uSize;
 
-// ─── 2. Shape Data ───
-// REDUZIERT: 16 -> 8
+/// The base color of the glass material.
+uniform vec4 uGlassColor;
+
+/// Optical properties packed into a single vector.
+/// x: Refractive Index
+/// y: Chromatic Aberration
+/// z: Thickness
+/// w: Blend factor
+uniform vec4 uOpticalProps;
+
+/// Lighting configuration packed into a single vector.
+/// x: (Unused)
+/// y: Light Intensity
+/// z: Ambient Strength
+/// w: Saturation
+uniform vec4 uLightConfig;
+
+/// Color adjustment parameters.
+/// x: Lightness
+/// y: Number of Shapes
+uniform vec2 uColorAdjust;
+
+/// Direction of the primary light source.
+uniform vec2 uLightDirection;
+
+/// Transformation matrix for converting screen coordinates to local space.
+uniform mat4 uTransform;
+
+/// Parameters for rim lighting.
+/// x: Rim Width (px)
+/// y: Rim Sharpness
+uniform vec2 uRimParams;
+
 #define MAX_SHAPES 8
-// float array[56] (8 * 7)
+
+/// Serialized shape data.
 uniform float uShapeData[MAX_SHAPES * 7];
 
-// ─── 3. Blur Settings ───
-uniform vec4 uBlurHeader;     // 4
-// vec4 array[24] -> 96 Floats
-uniform vec4 u_samples[24];   
+/// Settings for blur headers.
+uniform vec4 uBlurHeader;
 
-// ─── 4. Touch Handling ───
-// REDUZIERT: 8 -> 4
+/// Samples used for blur calculations.
+uniform vec4 u_samples[24];
+
 #define MAX_TOUCHES 4
-uniform float uTouchCount_f;             // 1
-uniform vec4 uTouches[MAX_TOUCHES];      // 4 * 4 = 16 Floats
-uniform float uTouchOwners[MAX_TOUCHES]; // 4 * 1 = 4 Floats
 
-// ─── 5. Glow & Overrides ───
-uniform float uGlobalBlurSigma;                     // 1
-uniform float uTouchGlowStrengths[MAX_TOUCHES];     // 4 * 1 = 4 Floats
-// vec4 array[32] -> 8 * 4 = 32 vec4s -> 128 Floats
-uniform vec4 uShapeGlowData[MAX_SHAPES * 4]; 
+/// The number of active touches as a float.
+uniform float uTouchCount_f;
 
-// ─── 6. Projection & Environment ───
-uniform vec2 uBgScale;         // 2
-uniform vec2 uNormalParams;    // 2
-uniform vec4 uChildProjection; // 4
-uniform vec2 uChildSize;       // 2
+/// Active touch positions and data.
+uniform vec4 uTouches[MAX_TOUCHES];
 
+/// Owner IDs for the active touches.
+uniform float uTouchOwners[MAX_TOUCHES];
+
+/// Global blur sigma value.
+uniform float uGlobalBlurSigma;
+
+/// Glow strengths for each touch.
+uniform float uTouchGlowStrengths[MAX_TOUCHES];
+
+/// Glow data per shape.
+uniform vec4 uShapeGlowData[MAX_SHAPES * 4];
+
+/// Scale factor for the background texture.
+uniform vec2 uBgScale;
+
+/// Parameters for normal calculation.
+/// x: Plateau Width
+/// y: Softness
+uniform vec2 uNormalParams;
+
+/// Projection parameters for the child texture.
+uniform vec4 uChildProjection;
+
+/// Size of the child texture.
+uniform vec2 uChildSize;
+
+/// Key color used for chroma keying or masking.
 uniform vec3 uKeyColor;
 
+/// The background scene texture.
 uniform sampler2D uBackgroundTexture;
+
+/// The texture of the child widget.
 uniform sampler2D uBackgroundChildTexture;
 
+/// Output fragment color.
 out vec4 fragColor;
 
-// ... (Rest des Codes: Macros, Includes, Main) bleibt unverändert ...s
-
-// -----------------------------------------------------------------------------
-// Optimization: Zero-Cost Macros instead of Variables
-// -----------------------------------------------------------------------------
-// Dies spart Register, da keine neuen Variablen angelegt werden müssen.
-
+// Property Accessors
 #define uRefractiveIndex      uOpticalProps.x
 #define uChromaticAberration  uOpticalProps.y
 #define uThickness            uOpticalProps.z
@@ -83,114 +123,91 @@ out vec4 fragColor;
 #define AGSL_AA_WIDTH_PX 1.0
 #endif
 
-// -----------------------------------------------------------------------------
-// Helper Functions
-// -----------------------------------------------------------------------------
-
-vec2 _computeSdfGradient(float dist) {
+/// Calculates the gradient of the signed distance field using hardware derivatives.
+vec2 _calculateSdfGradient(float dist) {
     return vec2(dFdx(dist), dFdy(dist));
 }
 
-vec3 _computeSurfaceNormal(float dist, vec2 grad, float thickness, float plateauWidth, float softness) {
-    // Optimierung: max(..., 1e-6) verhindert Division durch Null ohne Branching
+/// Computes the surface normal based on the SDF gradient and shape properties.
+vec3 _calculateSurfaceNormal(float dist, vec2 grad, float thickness, float plateauWidth, float softness) {
     float fullRange = thickness + plateauWidth;
     float t = max(fullRange + dist, 0.0) / max(fullRange, 1.0e-6);
-    
-    // Pow ist teuer, aber hier notwendig für den Look. 
-    // Wenn softness oft 1.0 ist, könnte man optimieren, aber so ist es sicher.
     float nCos = pow(t, softness);
     float nSin = sqrt(max(0.0, 1.0 - nCos * nCos));
     return normalize(vec3(grad * nCos, nSin));
 }
 
-// -----------------------------------------------------------------------------
-// Main
-// -----------------------------------------------------------------------------
+/// Normalizes screen coordinates to UV space [0, 1].
+vec2 _normalizeUV(vec2 screenPos, vec2 size) {
+    vec2 invSize = vec2(1.0) / max(size, vec2(1.0));
+    return screenPos * invSize;
+}
 
-void main() {
-    // 1. Coordinate Setup (Minimal set for SDF)
-    vec2 pScreen = FlutterFragCoord().xy;
-    
-    // Optimierung: Multiplikation ist schneller als Division. Inverse berechnen.
-    // max(..., 1.0) schützt vor Division durch Null.
-    vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0)); 
-    vec2 screenUV = pScreen * invSize;
-
+/// Flips the Y-coordinate if running on an OpenGL ES target.
+vec2 _correctUVForTarget(vec2 uv) {
     #ifdef IMPELLER_TARGET_OPENGLES
-    screenUV.y = 1.0 - screenUV.y;
+    return vec2(uv.x, 1.0 - uv.y);
     #endif
+    return uv;
+}
 
-    // Transform berechnen
-    // Hinweis: vec4 Konstruktor ist billig, Matrix-Mult ist hier notwendig.
-    vec2 p = (uTransform * vec4(pScreen, 0.0, 1.0)).xy;
-
-    // 2. SDF Calculation (Expensive Loop)
-    int idx;
-    float sdUnion = sceneSDF_withIndex_fast(p, idx);
-
-    // 3. Alpha Calculation
-    // AGSL_AA_WIDTH_PX ist Konstante, cast ist free.
-    float foregroundAlpha = smoothstep(
+/// Calculates the alpha value for the foreground shape based on SDF distance.
+float _calculateForegroundAlpha(float distance) {
+    return smoothstep(
         0.0,
         float(AGSL_AA_WIDTH_PX),
-        clamp(-sdUnion, 0.0, float(AGSL_AA_WIDTH_PX))
+        clamp(-distance, 0.0, float(AGSL_AA_WIDTH_PX))
     );
+}
 
-    // -------------------------------------------------------------------------
-    // EARLY EXIT
-    // -------------------------------------------------------------------------
+/// Computes the dynamic scaling factor applied to the background refraction.
+vec2 _calculateDynamicScale(float distance, float softness, vec2 targetScale) {
+    float rampWidth = max(softness, 1.0);
+    float scaleWeight = smoothstep(0.0, rampWidth, -distance);
+    return mix(vec2(1.0), max(targetScale, vec2(1.0e-4)), scaleWeight);
+}
+
+/// Computes the distorted UV coordinates based on the shape's center and refraction scale.
+vec2 _calculateDistortedUV(int shapeIndex, vec2 screenUV, vec2 scale, vec2 size) {
+    int baseIdx = shapeIndex * 7;
+    float cx = uShapeData[baseIdx + 1];
+    float cy = uShapeData[baseIdx + 2];
+    
+    vec2 centerScreenPx = _projectSdfToScreen(vec2(cx, cy));
+    vec2 centerUV = _correctUVForTarget(_normalizeUV(centerScreenPx, size));
+    
+    return centerUV + (screenUV - centerUV) / scale;
+}
+
+void main() {
+    vec2 pScreen = FlutterFragCoord().xy;
+    vec2 screenUV = _correctUVForTarget(_normalizeUV(pScreen, uSize));
+    
+    vec2 localPoint = (uTransform * vec4(pScreen, 0.0, 1.0)).xy;
+
+    int shapeIndex;
+    float sdUnion = sceneSDF_withIndex_fast(localPoint, shapeIndex);
+    
+    float foregroundAlpha = _calculateForegroundAlpha(sdUnion);
+
     if (foregroundAlpha < 0.01) {
         fragColor = _sampleTexture(uBackgroundTexture, screenUV);
         return;
     }
 
-    // -------------------------------------------------------------------------
-    // HEAVY LIFTING (Nur ausführen, wenn wir wirklich Glas rendern)
-    // -------------------------------------------------------------------------
-
-    // Child Coordinates (Erst hier berechnen)
-    vec2 invChildSize = vec2(1.0) / max(uChildSize, vec2(1.0));
-    vec2 childUV = pScreen * invChildSize;
-    
-    #ifdef IMPELLER_TARGET_OPENGLES
-    childUV.y = 1.0 - childUV.y;
-    #endif
-
-    // --- Dynamic Background Scaling ---
-    vec2 targetScale = max(uBgScale, vec2(1.0e-4));
-    float scaleRampWidth = max(uNormalSoftness, 1.0);
-    
-    // Scale Weight Berechnung
-    float scaleWeight = smoothstep(0.0, scaleRampWidth, -sdUnion);
-    vec2 dynamicS = mix(vec2(1.0), targetScale, scaleWeight);
-
-    // Center Berechnung für den aktiven Shape
-    // Indexzugriff auf Uniform-Arrays ist in ES 3.0+ schnell, aber wir machen es nur 1x.
-    int baseIdx = idx * 7;
-    float cx = uShapeData[baseIdx + 1];
-    float cy = uShapeData[baseIdx + 2];
-
-    vec2 centerScreenPx = _projectSdfToScreen(vec2(cx, cy));
-    vec2 centerUV = centerScreenPx * invSize;
-
-    #ifdef IMPELLER_TARGET_OPENGLES
-    centerUV.y = 1.0 - centerUV.y;
-    #endif
-
-    // Apply Scaling
-    vec2 scaledUV = centerUV + (screenUV - centerUV) / dynamicS;
+    vec2 childUV = _correctUVForTarget(_normalizeUV(pScreen, uChildSize));
     vec2 childUVRaw = uChildProjection.xy + childUV;
 
-    // Normal Calculation
-    // Gradienten basieren auf Screen-Space, müssen also hier berechnet werden
-    vec2 gradient = _computeSdfGradient(sdUnion);
-    vec3 normal = _computeSurfaceNormal(sdUnion, gradient, uThickness, uNormalPlateauWidth, uNormalSoftness);
+    vec2 dynamicScale = _calculateDynamicScale(sdUnion, uNormalSoftness, uBgScale);
+    vec2 scaledUV = _calculateDistortedUV(shapeIndex, screenUV, dynamicScale, uSize);
 
-    // 4. Final Composite
+    vec2 gradient = _calculateSdfGradient(sdUnion);
+    vec3 normal = _calculateSurfaceNormal(sdUnion, gradient, uThickness, uNormalPlateauWidth, uNormalSoftness);
+
     fragColor = renderLiquidGlass(
         scaledUV, 
         childUVRaw,
-        p,
+        localPoint,
         uSize,
         sdUnion,
         uThickness,
@@ -209,6 +226,6 @@ void main() {
         uLightness,
         rimWidthPx,
         rimSharpness,
-        idx
+        shapeIndex
     );
 }
