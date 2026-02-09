@@ -881,7 +881,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
         ..setFloat(baseIdx + 7, activeStyle.insideOnly ? 1.0 : 0.0)
         ..setFloat(baseIdx + 8, l)
         ..setFloat(baseIdx + 9, s)
-        ..setFloat(baseIdx + 10, activeStyle.tintMode.toDouble())
+        ..setFloat(baseIdx + 10, activeStyle.lightIntensity)
         ..setFloat(baseIdx + 11, activeStyle.strength)
         ..setFloat(baseIdx + 12, glassOverride.red / 255.0)
         ..setFloat(baseIdx + 13, glassOverride.green / 255.0)

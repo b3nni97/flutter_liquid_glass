@@ -23,7 +23,7 @@ class GlowStyle with EquatableMixin {
     // Glow-spezifische Parameter
     this.strength = 0.0,
     this.power = 2.0,
-    this.tintMode = 1, // 0=weiß, 1=Hintergrund-Tint, 2=feste Farbe
+    this.lightIntensity = 1,
     this.insideOnly = true,
     this.color = const Color(0xFFFFFFFF),
   });
@@ -39,7 +39,7 @@ class GlowStyle with EquatableMixin {
   // Glow-Anteil
   final double strength;
   final double power;
-  final int tintMode;
+  final double lightIntensity;
   final bool insideOnly;
   final Color color;
 
@@ -52,7 +52,7 @@ class GlowStyle with EquatableMixin {
     Color? glassColor,
     double? strength,
     double? power,
-    int? tintMode,
+    double? lightIntensity,
     bool? insideOnly,
     Color? color,
   }) {
@@ -65,7 +65,7 @@ class GlowStyle with EquatableMixin {
       glassColor: glassColor ?? this.glassColor,
       strength: strength ?? this.strength,
       power: power ?? this.power,
-      tintMode: tintMode ?? this.tintMode,
+      lightIntensity: lightIntensity ?? this.lightIntensity,
       insideOnly: insideOnly ?? this.insideOnly,
       color: color ?? this.color,
     );
@@ -84,13 +84,11 @@ class GlowStyle with EquatableMixin {
       enabled: useBoolsFromB ? b.enabled : a.enabled,
       insideOnly: useBoolsFromB ? b.insideOnly : a.insideOnly,
 
-      // Ints
-      tintMode: useBoolsFromB ? b.tintMode : a.tintMode,
-
       // Doubles
       mix: lerpDouble(a.mix, b.mix, t)!,
       strength: lerpDouble(a.strength, b.strength, t)!,
       power: lerpDouble(a.power, b.power, t)!,
+      lightIntensity: lerpDouble(a.lightIntensity, b.lightIntensity, t)!,
 
       // Nullable Doubles (null wird wie 0.0 behandelt)
       lightness: lerpDouble(a.lightness, b.lightness, t),
@@ -113,7 +111,7 @@ class GlowStyle with EquatableMixin {
         glassColor,
         strength,
         power,
-        tintMode,
+        lightIntensity,
         insideOnly,
         color,
       ];

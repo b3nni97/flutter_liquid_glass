@@ -79,7 +79,7 @@ struct GlowParams {
     float mixFactor;
     float lightMix;
     float satMix;
-    float tintMode;
+    float lightIntensity;
     float colorAlpha;
     float blurSigma;
     vec3 tintColor;
@@ -346,23 +346,58 @@ float _calculateLiquidHeight(float signedDistance, float thickness) {
 
 /// Computes masks for the rim lighting effect.
 RimMasks _calculateRimMasks(float signedDistance, float rimWidthPixels, float rimSharp) {
+    // 1. SDF Gradient berechnen (für Pixel-genaue Breite)
     vec2 gradient = vec2(dFdx(signedDistance), dFdy(signedDistance));
     float gradientMagnitude = max(length(gradient), 1e-6);
+    
+    // Die totale Breite des Rims im SDF-Raum
     float widthSdf = max(rimWidthPixels, 0.0) * gradientMagnitude;
+
+    // 2. Anti-Aliasing Breite berechnen (damit es bei 1.0 nicht pixelig wird)
+    // Wir nehmen ca. 1.5 Pixel als minimale Weichheit für die Kante
+    float aaWidth = 1.5 * gradientMagnitude; 
+
+    // 3. Die Länge des Fades bestimmen (Das ist die Kern-Logik!)
+    // Bei Sharpness 0.0 -> Fade ist so lang wie der ganze Rim (widthSdf) -> Weich
+    // Bei Sharpness 1.0 -> Fade ist nur so lang wie AA (aaWidth) -> Hart/Solid
+    float safeSharpness = clamp(rimSharp, 0.0, 1.0);
+    float fadeLength = mix(widthSdf, aaWidth, safeSharpness);
     
-    float edge01 = step(signedDistance, 0.0) * smoothstep(-widthSdf, 0.0, signedDistance);
-    float gamma = max(rimSharp, 1e-3);
+    // Sicherstellen, dass der Fade nicht länger als der Rim selbst ist
+    fadeLength = min(fadeLength, widthSdf);
+
+    // 4. Den Band berechnen
+    // Der Rim beginnt immer bei "-widthSdf" (tief innen).
+    // Das Ende des Fades (wo es voll sichtbar wird) variiert.
+    float startFade = -widthSdf;
+    float endFade = startFade + fadeLength;
+
+    float band = smoothstep(startFade, endFade, signedDistance);
+
+    // 5. Außengrenze abschneiden
+    // Wir müssen sicherstellen, dass das Licht nicht aus dem Objekt herausleuchtet (bei > 0.0)
+    // Auch hier nutzen wir AA für einen sauberen Schnitt am Objekt-Rand.
+    float outsideMask = 1.0 - smoothstep(-aaWidth, 0.0, signedDistance); 
+    // Oder einfacher, da signedDistance bei 0 endet: smoothstep(0.0, -aaWidth, signedDistance) wäre falschrum. 
+    // Besser: Wir nutzen smoothstep für den Rand bei 0.0:
+    float edgeLimit = smoothstep(0.0, -aaWidth, signedDistance); // Wird 0 wenn sd > 0
     
-    float band = pow(edge01, 1.0 / gamma);
-    float coreExponent = mix(3.0, 1.1, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
-    float core = pow(edge01, coreExponent / gamma);
-    
+    // Kombinieren: Band * Rand-Limit
+    // (Anmerkung: Da smoothstep oben schon bis 'endFade' geht, und endFade <= 0 ist, 
+    // brauchen wir edgeLimit eigentlich nur, wenn der Fade sehr lang ist. 
+    // Aber um sicher zu gehen, dass wir bei sd > 0 schwarz sind:)
+    band *= step(signedDistance, 0.0); 
+
+    // 6. Core (Highlight) anpassen
+    // Der Core sollte immer etwas "heißer" und schmaler sein als der Rim.
+    // Wir machen ihn abhängig vom Band, aber quadrieren ihn für einen Hotspot-Effekt.
+    float core = pow(band, 3.0); 
+
     RimMasks masks;
     masks.band = band;
     masks.core = core;
     return masks;
 }
-
 /// Blends a tint color into the liquid based on glass opacity.
 vec4 _blendGlassTint(vec4 liquidColor, vec4 glassColor) {
     vec4 finalColor = liquidColor;
@@ -440,7 +475,8 @@ vec3 _resolveDispersion(
     float saturation,
     float lightness,
     vec4 glassColor,
-    float isIcon
+    float isIcon,
+    vec3 lighting
 ) {
     float type, radius;
     vec2 centerSdf, sizeSdf;
@@ -479,9 +515,11 @@ vec3 _resolveDispersion(
     vec4 sampleGreenChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement); 
 
     sampleRedBg = _blendGlassTint(sampleRedBg, glassColor);
+    sampleRedBg.rgb += lighting;
     sampleRedBg.rgb = _adjustColorBalance(sampleRedBg.rgb, saturation, lightness);
     
     sampleBlueBg = _blendGlassTint(sampleBlueBg, glassColor);
+    sampleBlueBg.rgb += lighting;
     sampleBlueBg.rgb = _adjustColorBalance(sampleBlueBg.rgb, saturation, lightness);
 
     if (sampleRedChild.a <= 0.001) sampleRedChild = sampleGreenChild;
@@ -592,7 +630,7 @@ vec4 _calculateRefractionLayer(
     vec3 diffNew = _resolveDispersion(
         uvBase, childUVBase, outRefractionDisplacement, sizePixels,
         backgroundTexture, childTexture, shapeIndex, ca, backgroundSample,
-        saturation, lightness, glassColor, isIcon
+        saturation, lightness, glassColor, isIcon, lighting
     );
 
     float caMixNew = clamp(float(LG_CA_OPACITY), 0.0, 1.0);
@@ -604,7 +642,6 @@ vec4 _calculateRefractionLayer(
     return vec4(finalRGB, backgroundSample.a);
 }
 
-/// Computes the total lighting contribution including rim and directional lights.
 vec3 _calculateTotalLighting(
     float signedDistance, float thickness,
     vec2 lightDirection, float lightIntensity, float ambientStrength,
@@ -613,34 +650,77 @@ vec3 _calculateTotalLighting(
     vec2 nXyNormalized
 ) {
     float thicknessFactor = smoothstep(5.0, 7.0, thickness);
-    if (thicknessFactor < 0.01 || lightIntensity < 0.01) {
+    float effectiveIntensity = lightIntensity * lightIntensity;
+
+    if (thicknessFactor < 0.01 || effectiveIntensity < 0.001) {
         return vec3(0.0);
     }
+
+    // ---------------------------------------------------------
+    // 1. MASKE FÜR AMBIENT (Wie gehabt)
+    // ---------------------------------------------------------
+    float facingAmbient = abs(dot(nXyNormalized, lightDirection));
+    float maskAmbient = masks.band * pow(facingAmbient, 0.7);
+
+    // ---------------------------------------------------------
+    // 2. MASKE FÜR HIGHLIGHT (Oben/Unten Kanten finden)
+    // ---------------------------------------------------------
+    float facingTop = abs(nXyNormalized.y); 
+    float maskTop = masks.band * pow(facingTop, 0.7);
+
+    // ---------------------------------------------------------
+    // 3. DEIN GRADIENT (NUR DIE OBERSTEN 20% FÜR HIGHLIGHT)
+    // ---------------------------------------------------------
+    float verticalAlign = -nXyNormalized.y;
+    float t = clamp(verticalAlign * 0.5 + 0.5, 0.0, 1.0);
+    float highlightGradient = smoothstep(0.9, 1.0, t); 
+
+    // ---------------------------------------------------------
+    // 4. ZUSAMMENBAUEN
+    // ---------------------------------------------------------
+
+    vec3 highlightColor = _computeAdaptiveHighlight(backgroundColor, 0.7);
     
-    float facing = abs(dot(nXyNormalized, lightDirection));
-    float lightMask = pow(facing, 0.7);
-    float rimMask = masks.band * lightMask;
+    // A) HIGHLIGHT: Nutzt den Top-Gradienten
+    vec3 directionalRim = highlightColor * highlightGradient * effectiveIntensity;
+    directionalRim *= maskTop;
+
+    // B) AMBIENT: Hier fügen wir den 80% Verlauf ein!
+    // -----------------------------------------------------
+    // Wir prüfen: Wo sind wir relativ zur Lichtquelle?
+    // lightDirection ist der Fluss (nach unten rechts).
+    // -normalize(lightDirection) zeigt zur Quelle (nach oben links).
+    float ambientAlign = dot(nXyNormalized, -normalize(lightDirection));
     
-    if (rimMask < 1e-3) {
-        return vec3(0.0);
-    }
+    // Mapping [-1 bis 1] -> [0 bis 1]
+    // 1.0 = Lichtseite (Oben Links)
+    // 0.0 = Gegenseite (Unten Rechts)
+    float tAmb = ambientAlign * 0.5 + 0.5;
+
+    // Die "Opposite Side" soll nur 80% (0.8) haben, die Lichtseite 100% (1.0).
+    float ambientGrad = mix(0.92, 1.0, tAmb);
+    // -----------------------------------------------------
+
+    vec3 ambientRimColor = _computeAdaptiveHighlight(backgroundColor, 0.4);
     
-    float mainLight = max(0.0, dot(nXyNormalized, lightDirection));
-    float oppositeLight = max(0.0, dot(nXyNormalized, -lightDirection));
-    float totalLight = mainLight + oppositeLight * 0.8;
-    
-    vec3 highlight = _computeAdaptiveHighlight(backgroundColor, 0.7);
-    vec3 directionalRim = highlight * (totalLight * totalLight) * lightIntensity * 2.0;
-    vec3 ambientRim = _computeAdaptiveHighlight(backgroundColor, 0.4) * ambientStrength;
+    // Wir multiplizieren ambientGrad dazu:
+    vec3 ambientRim = ambientRimColor * ambientStrength * ambientGrad; 
+    ambientRim *= maskAmbient;
     
     vec3 lighting = (directionalRim + ambientRim);
+    
+    // Core (Weißer Kern)
     float whitePull = 0.55;
     float coreGain = mix(0.16, 0.36, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
     
-    vec3 towardWhite = mix(lighting, vec3(1.0), whitePull);
-    lighting = mix(lighting, towardWhite, masks.core * coreGain);
+    // Core reagiert auf Highlight-Gradient
+    float effectiveCoreGain = masks.core * coreGain * effectiveIntensity * highlightGradient;
     
-    return lighting * rimMask * thicknessFactor;
+    vec3 towardWhite = mix(lighting, vec3(1.0), whitePull);
+    
+    lighting = mix(lighting, towardWhite, effectiveCoreGain);
+    
+    return lighting * thicknessFactor;
 }
 
 /// Identifies the best glow parameters for the current pixel from active touches.
@@ -704,7 +784,7 @@ bool _findBestGlowParams(
             outParams.mixFactor = glowMix;
             outParams.lightMix = d2.x;
             outParams.satMix = d2.y;
-            outParams.tintMode = d2.z;
+            outParams.lightIntensity = d2.z;
             outParams.colorAlpha = d0.w;
             outParams.blurSigma = d1.z;
             outParams.tintColor = d0.rgb;
@@ -760,21 +840,15 @@ vec4 _applyInteractiveGlow(
     }
 
     vec4 coloredLocal = _blendGlassTint(refractLocal, effectiveGlass);
-    coloredLocal.rgb += lighting;
+    coloredLocal.rgb += lighting * params.lightIntensity;
     coloredLocal.rgb = _adjustColorBalance(coloredLocal.rgb, effectiveSat, effectiveLight);
-
-    vec3 tint;
-    if (params.tintMode < 0.5) {
-        tint = vec3(1.0);
-    } else if (params.tintMode < 1.5) {
-        tint = _computeAdaptiveHighlight(backgroundColor, 1.0);
-    } else {
-        tint = params.tintColor;
-    }
+     
+    // Always use adaptive highlight with the lightIntensity parameter
+    vec3 tint = _computeAdaptiveHighlight(backgroundColor, 1.0);
     
     vec4 tintGlass = vec4(tint, bestShapedValue * params.colorAlpha); 
     coloredLocal = _blendGlassTint(coloredLocal, tintGlass);
-    
+   
     return mix(coloredBase, coloredLocal, bestShapedValue);
 }
 
