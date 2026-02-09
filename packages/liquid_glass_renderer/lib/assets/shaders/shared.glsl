@@ -663,6 +663,7 @@ float _computeTouchGlowMask(vec2 positionPixels, vec2 positionSdf, float insideO
         if (i >= int(count)) break;
         
         int owner = int(floor(uTouchOwners[i] + 0.5));
+
         int targetShape = (owner >= 0) ? owner : shapeIndex;
         
         float sdOwner = _sdShapeAt(targetShape, positionSdf);
@@ -683,6 +684,9 @@ float _computeTouchGlowMask(vec2 positionPixels, vec2 positionSdf, float insideO
     return outMask;
 }
 
+// HIER WURDE _computeTouchGlowMask ENTFERNT/INTEGRIERT, 
+// DA WIR DIE DATEN VOM OWNER BRAUCHEN, UM DIE MASKE KORREKT ZU BERECHNEN.
+
 // FIX: Renamed params uSizePx->size, etc.
 vec4 _applyInteractiveGlow(
     vec4 coloredBase,
@@ -701,44 +705,128 @@ vec4 _applyInteractiveGlow(
     float saturation,
     vec3 backgroundColor
 ) {
+    // Early exit wenn keine Touches oder invalider Shape
     if (shapeIndex < 0 || uTouchCount_f <= 0.5) return coloredBase;
 
-    int baseIndex = shapeIndex * 4;
-    
-    vec4 data0 = uShapeGlowData[baseIndex + 0];
-    vec4 data1 = uShapeGlowData[baseIndex + 1];
-    vec4 data2 = uShapeGlowData[baseIndex + 2];
-    vec4 data3 = uShapeGlowData[baseIndex + 3];
+    // Wir suchen den stärksten Glow-Effekt an dieser Pixel-Position
+    float bestShapedValue = 0.0;
+    int bestDataIndex = -1;
 
-    float glowStrength = data2.w;
-    if (glowStrength <= 0.0001) return coloredBase;
-    
-    float glowInside = data1.w;
-    float maskRaw = _computeTouchGlowMask(position, position, glowInside, signedDistance, shapeIndex);
-    
-    if (maskRaw <= 0.0) return coloredBase;
-    
-    float glowPower = max(data1.x, 0.0001);
-    float glowMix = clamp(data1.y, 0.0, 1.0);
-    
-    float shaped = pow(clamp(maskRaw, 0.0, 1.0), glowPower) * glowStrength * glowMix;
-    shaped = clamp(shaped, 0.0, 1.0);
+    // Temporäre Variablen für den Gewinner
+    vec4 bestData0;
+    vec4 bestData1;
+    vec4 bestData2;
+    vec4 bestData3;
 
-    float tLight = data2.x;
-    float tSat = data2.y;
-    vec4 tGlass = data3;
+    int count = int(uTouchCount_f);
+    
+    // SCHLEIFE ÜBER ALLE TOUCHES
+    for (int i = 0; i < 8; ++i) {
+        if (i >= count) break;
+        
+        int owner = int(floor(uTouchOwners[i] + 0.5));
+        
+        // KERN-ÄNDERUNG:
+        // Wir bestimmen den Index für die GLOW-DATEN basierend auf dem OWNER, 
+        // nicht auf dem aktuellen shapeIndex.
+        // Wenn owner -1 ist (kein Owner), fallback auf shapeIndex.
+        int dataSourceIndex = (owner >= 0) ? owner : shapeIndex;
+        
+        // Jetzt lesen wir die Daten DIESES Owners
+        int baseIdx = dataSourceIndex * 4;
+        vec4 d0 = uShapeGlowData[baseIdx + 0];
+        vec4 d1 = uShapeGlowData[baseIdx + 1];
+        vec4 d2 = uShapeGlowData[baseIdx + 2];
+        // d3 lesen wir nur, wenn wir gewinnen (Optimierung)
 
-    float effectiveLight = (tLight > -0.5) ? mix(lightness, tLight, shaped) : lightness;
-    float effectiveSat = (tSat > -0.5)  ? mix(saturation, tSat, shaped) : saturation;
-    // ACHTUNG: uGlassColor hier ist ein Uniform und kollidiert mit der main definition,
-    // aber wir sind in einer Funktion. Wenn uGlassColor nicht als Parameter übergeben wurde,
-    // greift es auf das globale Uniform zu (was OK ist, solange kein #define uGlassColor... aktiv ist).
-    // ABER: Im main shader haben wir #define uGlassColor... NICHT gemacht (es ist ein vec4 Uniform).
-    // Warte, uGlassColor ist layout(location=1). Das ist kein Makro. Das ist sicher.
-    vec4 effectiveGlass = mix(uGlassColor, tGlass, shaped);
+        float currentGlowStrength = d2.w;
+        // Wenn der Owner gar keinen Glow hat, überspringen
+        if (currentGlowStrength <= 0.0001) continue;
+
+        // Geometrie-Check: Welcher Shape definiert die Grenzen? (Owner)
+        int targetShape = (owner >= 0) ? owner : shapeIndex;
+        float sdOwner = _sdShapeAt(targetShape, position); // positionSdf wird hier als 'position' erwartet
+        
+        // Feathering und Inside-Logik basierend auf den Daten des OWNERS
+        float widthAa = max(fwidth(sdOwner), 1e-6) * GLOW_OWNER_FEATHER_PX;
+        float inShape = smoothstep(0.0, widthAa, -sdOwner);
+        
+        // Parameter 'glowInside' kommt aus d1.w vom Owner
+        float glowInside = d1.w;
+        
+        // Logik aus der alten _computeTouchGlowMask:
+        // Wenn glowInside aktiv ist (z.B. > 0.5), aber wir sind nicht im Shape -> mask = 0
+        // (Hier vereinfacht: Wenn wir eine "Außen"-Glow Logik haben wollen, müsste man das anpassen, 
+        // aber meistens ist inShape relevant für Liquid Glass).
+        // Falls der User "Glow auch außen" erlaubt, müsste man hier die Logik prüfen.
+        // Die originale Funktion nutzte 'inShape' multiplikativ, also nehmen wir das so an:
+        if (inShape <= 1e-5) continue; 
+
+        // Distanz zum Touch Punkt
+        vec4 touchParams = uTouches[i];
+        // Achtung: touchParams.xy sind Pixel-Koordinaten, position ist SDF-Space?
+        // Im Original-Code wurde positionPixels und positionSdf getrennt übergeben.
+        // In _applyInteractiveGlow wird 'position' als SDF-Pos übergeben, 
+        // wir müssen sicherstellen, dass wir die Distanz korrekt messen.
+        // Da wir im Fragment Shader sind, ist es sauberer, 'position' (SDF Space) 
+        // in Screen Space umzurechnen oder die Touch-Pos in SDF Space.
+        // ABER: Im Original-Aufruf war 'position' für beides genutzt:
+        // _computeTouchGlowMask(position, position, ...) -> Das deutet darauf hin, 
+        // dass SDF Space und Pixel Space hier gleich behandelt werden oder transformiert sind?
+        // Prüfen wir renderLiquidGlass Aufruf: 'position' kommt rein.
+        // Normalerweise ist Distanzberechnung: length(screenPos - touchPos).
+        // Wir nehmen hier 'position' an (was im Original Pixel-Space sein sollte laut Variablennamen 'positionPixels').
+        
+        float dist = length(position - touchParams.xy);
+        float inner = touchParams.z;
+        float outer = touchParams.z + max(touchParams.w, 1e-3);
+        
+        float radial = smoothstep(outer, inner, dist);
+        
+        // Touch Strength vom Input-System
+        float inputStrength = clamp(uTouchGlowStrengths[i], 0.0, 1.0);
+        
+        // Maske berechnen
+        float maskRaw = radial * inShape * inputStrength;
+        
+        if (maskRaw <= 0.0001) continue;
+
+        // Nun berechnen wir den finalen "Shaped" wert mit den Style-Daten des Owners
+        float glowPower = max(d1.x, 0.0001);
+        float glowMix   = clamp(d1.y, 0.0, 1.0);
+        
+        float shaped = pow(maskRaw, glowPower) * currentGlowStrength * glowMix;
+        shaped = clamp(shaped, 0.0, 1.0);
+
+        // Wir nehmen den stärksten Effekt (Maximum)
+        if (shaped > bestShapedValue) {
+            bestShapedValue = shaped;
+            bestDataIndex = dataSourceIndex; // Merken für später
+            
+            // Daten cachen für die Anwendung unten
+            bestData0 = d0;
+            bestData1 = d1;
+            bestData2 = d2;
+            bestData3 = uShapeGlowData[baseIdx + 3];
+        }
+    }
+
+    // Wenn kein Glow gefunden wurde
+    if (bestDataIndex == -1 || bestShapedValue <= 0.001) return coloredBase;
+
+    // --- ANWENDUNG DES GLOWS MIT DEN GEWINNER-DATEN ---
+    
+    float tLight = bestData2.x;
+    float tSat   = bestData2.y;
+    vec4 tGlass  = bestData3;
+
+    float effectiveLight = (tLight > -0.5) ? mix(lightness, tLight, bestShapedValue) : lightness;
+    float effectiveSat   = (tSat > -0.5)   ? mix(saturation, tSat, bestShapedValue) : saturation;
+    
+    vec4 effectiveGlass = mix(uGlassColor, tGlass, bestShapedValue);
 
     vec4 refractLocal = refractColorBase;
-    float tBlur = data1.z;
+    float tBlur = bestData1.z;
     float extraSigma = (tBlur > -0.5) ? max(tBlur - uGlobalBlurSigma, 0.0) : 0.0;
     
     if (extraSigma > 0.01) {
@@ -752,8 +840,8 @@ vec4 _applyInteractiveGlow(
     coloredLocal.rgb += lighting;
     coloredLocal.rgb = _adjustColorBalance(coloredLocal.rgb, effectiveSat, effectiveLight);
 
-    float glowTintMode = data2.z;
-    float colorAlpha = data0.w;
+    float glowTintMode = bestData2.z;
+    float colorAlpha = bestData0.w;
 
     vec3 tint;
     if (glowTintMode < 0.5) {
@@ -761,13 +849,13 @@ vec4 _applyInteractiveGlow(
     } else if (glowTintMode < 1.5) {
         tint = _computeAdaptiveHighlight(backgroundColor, 1.0);
     } else {
-        tint = data0.rgb;
+        tint = bestData0.rgb;
     }
     
-    vec4 tintGlass = vec4(tint, shaped * colorAlpha); 
+    vec4 tintGlass = vec4(tint, bestShapedValue * colorAlpha); 
     coloredLocal = _blendGlassTint(coloredLocal, tintGlass);
     
-    return mix(coloredBase, coloredLocal, shaped);
+    return mix(coloredBase, coloredLocal, bestShapedValue);
 }
 
 // FIX: Renamed ALL params to avoid collision with Macros in Main Shader
