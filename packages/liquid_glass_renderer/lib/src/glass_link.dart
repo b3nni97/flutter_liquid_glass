@@ -106,7 +106,7 @@ class GlassLink with ChangeNotifier {
           globalBounds: rect,
           transform: transform,
         ));
-      } catch (exception, stack) {
+      } catch (exception, _) {
         // Silently skip shapes that fail transform calculation (e.g. singular transforms).
         // Reporting to FlutterError is avoided here to prevent noise during
         // transient layout states, but logged if debug mode is preferred.
