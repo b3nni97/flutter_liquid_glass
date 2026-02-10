@@ -347,50 +347,39 @@ float _calculateLiquidHeight(float signedDistance, float thickness) {
 /// Computes masks for the rim lighting effect.
 RimMasks _calculateRimMasks(float signedDistance, float rimWidthPixels, float rimSharp) {
     // 1. SDF Gradient berechnen (für Pixel-genaue Breite)
+    // Dies bestimmt, wie breit 1 Pixel im SDF-Raum ist.
     vec2 gradient = vec2(dFdx(signedDistance), dFdy(signedDistance));
     float gradientMagnitude = max(length(gradient), 1e-6);
     
     // Die totale Breite des Rims im SDF-Raum
     float widthSdf = max(rimWidthPixels, 0.0) * gradientMagnitude;
 
-    // 2. Anti-Aliasing Breite berechnen (damit es bei 1.0 nicht pixelig wird)
-    // Wir nehmen ca. 1.5 Pixel als minimale Weichheit für die Kante
+    // 2. Anti-Aliasing Breite berechnen
+    // Wir nehmen ca. 1.5 Pixel als Breite für die Weichheit an der Kante.
     float aaWidth = 1.5 * gradientMagnitude; 
 
-    // 3. Die Länge des Fades bestimmen (Das ist die Kern-Logik!)
-    // Bei Sharpness 0.0 -> Fade ist so lang wie der ganze Rim (widthSdf) -> Weich
-    // Bei Sharpness 1.0 -> Fade ist nur so lang wie AA (aaWidth) -> Hart/Solid
+    // 3. Die Länge des inneren Fades bestimmen (Das bleibt wie es war)
     float safeSharpness = clamp(rimSharp, 0.0, 1.0);
     float fadeLength = mix(widthSdf, aaWidth, safeSharpness);
-    
-    // Sicherstellen, dass der Fade nicht länger als der Rim selbst ist
     fadeLength = min(fadeLength, widthSdf);
 
-    // 4. Den Band berechnen
-    // Der Rim beginnt immer bei "-widthSdf" (tief innen).
-    // Das Ende des Fades (wo es voll sichtbar wird) variiert.
+    // 4. Den Band berechnen (Das "Reinfaden" ins Innere)
+    // Das bleibt exakt so, wie du es haben wolltest.
     float startFade = -widthSdf;
     float endFade = startFade + fadeLength;
-
     float band = smoothstep(startFade, endFade, signedDistance);
 
-    // 5. Außengrenze abschneiden
-    // Wir müssen sicherstellen, dass das Licht nicht aus dem Objekt herausleuchtet (bei > 0.0)
-    // Auch hier nutzen wir AA für einen sauberen Schnitt am Objekt-Rand.
-    float outsideMask = 1.0 - smoothstep(-aaWidth, 0.0, signedDistance); 
-    // Oder einfacher, da signedDistance bei 0 endet: smoothstep(0.0, -aaWidth, signedDistance) wäre falschrum. 
-    // Besser: Wir nutzen smoothstep für den Rand bei 0.0:
-    float edgeLimit = smoothstep(0.0, -aaWidth, signedDistance); // Wird 0 wenn sd > 0
+    // 5. Außengrenze WEICH abschneiden (KORRIGIERT)
+    // Wir ersetzen den 'step' durch einen smoothstep.
+    // Dieser Fade geht von 1.0 (bei -aaWidth, kurz vor der Kante)
+    // auf 0.0 (exakt bei 0.0, der Kante).
+    // Dadurch entsteht der gewünschte 1.5px weiche Randabschluss.
+    float outerEdgeFade = 1.0 - smoothstep(-aaWidth, 0.0, signedDistance);
     
-    // Kombinieren: Band * Rand-Limit
-    // (Anmerkung: Da smoothstep oben schon bis 'endFade' geht, und endFade <= 0 ist, 
-    // brauchen wir edgeLimit eigentlich nur, wenn der Fade sehr lang ist. 
-    // Aber um sicher zu gehen, dass wir bei sd > 0 schwarz sind:)
-    band *= step(signedDistance, 0.0); 
+    // Wir multiplizieren den inneren Verlauf mit dem äußeren Kanten-Fade.
+    band *= outerEdgeFade;
 
     // 6. Core (Highlight) anpassen
-    // Der Core sollte immer etwas "heißer" und schmaler sein als der Rim.
-    // Wir machen ihn abhängig vom Band, aber quadrieren ihn für einen Hotspot-Effekt.
     float core = pow(band, 3.0); 
 
     RimMasks masks;
@@ -398,6 +387,7 @@ RimMasks _calculateRimMasks(float signedDistance, float rimWidthPixels, float ri
     masks.core = core;
     return masks;
 }
+
 /// Blends a tint color into the liquid based on glass opacity.
 vec4 _blendGlassTint(vec4 liquidColor, vec4 glassColor) {
     vec4 finalColor = liquidColor;
@@ -462,6 +452,7 @@ vec3 _blendHardLight(vec3 base, vec3 blend) {
 }
 
 /// Resolves chromatic aberration and dispersion effects.
+/// Resolves chromatic aberration and dispersion effects.
 vec3 _resolveDispersion(
     vec2 uvBase,
     vec2 childUVBase,
@@ -475,8 +466,7 @@ vec3 _resolveDispersion(
     float saturation,
     float lightness,
     vec4 glassColor,
-    float isIcon,
-    vec3 lighting
+    float isIcon
 ) {
     float type, radius;
     vec2 centerSdf, sizeSdf;
@@ -515,11 +505,9 @@ vec3 _resolveDispersion(
     vec4 sampleGreenChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement); 
 
     sampleRedBg = _blendGlassTint(sampleRedBg, glassColor);
-    sampleRedBg.rgb += lighting;
     sampleRedBg.rgb = _adjustColorBalance(sampleRedBg.rgb, saturation, lightness);
     
     sampleBlueBg = _blendGlassTint(sampleBlueBg, glassColor);
-    sampleBlueBg.rgb += lighting;
     sampleBlueBg.rgb = _adjustColorBalance(sampleBlueBg.rgb, saturation, lightness);
 
     if (sampleRedChild.a <= 0.001) sampleRedChild = sampleGreenChild;
@@ -530,24 +518,36 @@ vec3 _resolveDispersion(
     
     vec3 hardLightRed = _blendHardLight(sampleRedBg.rgb, colorRed);
     vec3 targetRed = mix(colorRed, hardLightRed, isIcon);
-    
     float redComponent = mix(sampleRedBg.r, targetRed.r, sampleRedChild.a);
 
     vec3 hardLightBlue = _blendHardLight(sampleBlueBg.rgb, colorBlue);
     vec3 targetBlue = mix(colorBlue, hardLightBlue, isIcon);
-    
     float blueComponent = mix(sampleBlueBg.b, targetBlue.b, sampleBlueChild.a);
 
     float greenComponent = baseColor.g; 
 
+    // --- KORREKTUR START ---
+    
+    // Wir bauen das Bild erst "clean" zusammen
     vec3 spectralNew = vec3(redComponent, greenComponent, blueComponent);
+    
+    // Jetzt berechnen wir den Unterschied zum Basis-Pixel (Das ist der reine CA-Effekt)
     vec3 diff = spectralNew - baseColor.rgb;
+
+    // Kanal-Gewichtung (Blau Boost)
+    // Wir wenden den Boost NUR auf den 'diff' an.
+    // Wenn diff == 0 (Mitte des Shapes), passiert nichts (0 * 1.4 = 0).
+    // Wenn diff > 0 (Blauer Rand), wird er verstärkt.
+    vec3 channelWeights = vec3(1.0, 0.9, 1.3);
+    diff *= channelWeights; 
+
+    // --- KORREKTUR ENDE ---
+
     diff *= float(LG_CA_LIGHTNESS_BOOST) * float(LG_CA_NEW_GAIN);
     
     float luminanceNew = dot(diff, vec3(0.299, 0.587, 0.114));
     return mix(vec3(luminanceNew), diff, float(LG_CA_SATURATION_BOOST));
 }
-
 /// Determines if the current pixel belongs to an icon or a background based on color keying.
 float _calculateIconMask(vec3 childRGB, vec3 keyColor) {
     vec3 diffVec = abs(childRGB - keyColor);
@@ -568,7 +568,7 @@ vec4 _calculateRefractionLayer(
     int shapeIndex,
     float saturation,
     float lightness,
-    vec4 glassColor, vec3 lighting
+    vec4 glassColor
 ) {
     vec3 incident = vec3(0.0, 0.0, -1.0);
     float n = max(refractiveIndex, 1.0001);
@@ -590,7 +590,6 @@ vec4 _calculateRefractionLayer(
     outRawTexture = backgroundSample;
 
     backgroundSample = _blendGlassTint(backgroundSample, glassColor);
-    backgroundSample.rgb += lighting;
     backgroundSample.rgb = _adjustColorBalance(backgroundSample.rgb, saturation, lightness);
     
     vec4 childSample = _blurJitterRefraction(childTexture, uvChild, blurRadius, sizePixels, uvChild);
@@ -619,7 +618,6 @@ vec4 _calculateRefractionLayer(
     );
     
     baseAA = _blendGlassTint(baseAA, glassColor);
-    baseAA.rgb += lighting;
     baseAA.rgb = _adjustColorBalance(baseAA.rgb, saturation, lightness);
     
     vec3 glassAA = _blendHardLight(baseAA.rgb, childRGB);
@@ -630,7 +628,7 @@ vec4 _calculateRefractionLayer(
     vec3 diffNew = _resolveDispersion(
         uvBase, childUVBase, outRefractionDisplacement, sizePixels,
         backgroundTexture, childTexture, shapeIndex, ca, backgroundSample,
-        saturation, lightness, glassColor, isIcon, lighting
+        saturation, lightness, glassColor, isIcon
     );
 
     float caMixNew = clamp(float(LG_CA_OPACITY), 0.0, 1.0);
@@ -840,7 +838,7 @@ vec4 _applyInteractiveGlow(
     }
 
     vec4 coloredLocal = _blendGlassTint(refractLocal, effectiveGlass);
-    coloredLocal.rgb += lighting * params.lightIntensity;
+     coloredLocal.rgb += lighting * params.lightIntensity;
     coloredLocal.rgb = _adjustColorBalance(coloredLocal.rgb, effectiveSat, effectiveLight);
      
     // Always use adaptive highlight with the lightIntensity parameter
@@ -887,7 +885,7 @@ vec4 renderLiquidGlass(
     RimMasks masks = _calculateRimMasks(signedDistance, rimWidthPixels, rimSharp);
     vec2 nXyNormalized = _safeNormalize(normal.xy);
     
-    vec3 lighting = _calculateTotalLighting(
+    vec3 lighting =  _calculateTotalLighting(
         signedDistance, thickness,
         lightDirection, lightIntensity, ambientStrength,
         backgroundColor.rgb, rimWidthPixels, 
@@ -904,15 +902,15 @@ vec4 renderLiquidGlass(
         childTexture, childUVBase, keyColor,
         refractionDisplacement, rawRefractionTexture,
         shapeIndex,
-        saturation, lightness, glassColor, lighting
+        saturation, lightness, glassColor
     );
-
+ refractColorBase.rgb += lighting;
     vec4 outColor = _applyInteractiveGlow(
         refractColorBase, rawRefractionTexture, screenUV, refractionDisplacement, childUVBase,
         position, signedDistance, shapeIndex, size, backgroundTexture, childTexture,
         lighting, lightness, saturation, backgroundColor.rgb
     );
-
+   
     float coverage = _computeCoverageAA(signedDistance);
     float baseAlpha = foregroundAlpha * coverage;
     
