@@ -528,9 +528,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
 
   @override
   void dispose() {
-    _glassLink
-      ..removeListener(_onGlassLinkChanged)
-      ..dispose();
+    _glassLink.removeListener(_onGlassLinkChanged);
     _backdropHandle.layer = null;
     super.dispose();
   }
