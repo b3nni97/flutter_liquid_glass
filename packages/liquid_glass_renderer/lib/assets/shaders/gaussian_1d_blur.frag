@@ -4,103 +4,119 @@
 precision mediump float;
 precision mediump int;
 
-// ─── 1. Essential Properties (Compact Layout) ───
-uniform vec2 uSize;           // Index 0
-uniform vec4 uOpticalProps;   // Index 2 (Thickness, Blend für SDF nötig)
-uniform vec2 uColorAdjust;    // Index 6 (NumShapes für SDF nötig)
+// Viewport dimensions in physical pixels.
+uniform vec2 uViewSize;
 
-// Indizes 10, 12, 14, ... entfallen hier (Licht, Farbe etc.)
+// Optical configuration.
+// z: Thickness of the shape.
+// w: Blend factor for the SDF.
+uniform vec4 uOpticalProperties;
 
-// ─── 2. Shape Data ───
+// Color adjustment settings.
+// y: Number of active shapes.
+uniform vec2 uColorAdjustment;
+
+// Shape geometry data packed into a float array.
+// Capacity allows for up to 8 shapes with 7 attributes each.
 #define MAX_SHAPES 8
-// Start: Index 24 (8 + 16)
 uniform float uShapeData[MAX_SHAPES * 7];
 
-// ─── 3. Blur Settings ───
-// Start: Index 80 (24 + 56)
-uniform vec4 uBlurHeader;   
+// Blur configuration header.
+// x: Direction X component.
+// y: Direction Y component.
+// z: Sample count.
+// w: Tile mode.
+uniform vec4 uBlurConfiguration;
 
-#define u_dir_x        (uBlurHeader.x)
-#define u_dir_y        (uBlurHeader.y)
-#define u_sample_count (uBlurHeader.z)
-#define u_tile_mode    (uBlurHeader.w)
-// Start: Index 84
-uniform vec4 u_samples[24];   
+// Gaussian blur kernel samples.
+// x: Offset.
+// z: Weight.
+uniform vec4 uBlurKernel[24];
 
-// ─── Samplers ───
+// Background texture sampler.
 uniform sampler2D uBackgroundTexture;
 
+// Output fragment color.
 out vec4 fragColor;
 
-// ───────────────────── DEFINES (Fix für Includes) ────────────────────────────
-// WICHTIG: #define statt float, damit das Include die Werte sieht.
-#define uThickness (uOpticalProps.z)
-#define uBlend     (uOpticalProps.w)
-#define uNumShapes (uColorAdjust.y)
+// Maps optical property z to thickness for the SDF include.
+#define uThickness (uOpticalProperties.z)
 
-// ───────────────────── Helper ────────────────────────────────────────────────
-vec2 _mirror01(vec2 uv){
-  vec2 m = mod(uv, 2.0);
-  return mix(m, 2.0 - m, step(1.0, m));
+// Maps optical property w to blend factor for the SDF include.
+#define uBlend (uOpticalProperties.w)
+
+// Maps color adjustment y to shape count for the SDF include.
+#define uNumShapes (uColorAdjustment.y)
+
+// Samples the background texture with clamp-to-edge protection.
+// Prevents edge artifacts by applying a half-pixel padding based on view size.
+vec4 sampleTextureSafe(vec2 uv) {
+  vec2 epsilon = vec2(0.5) / max(uViewSize, vec2(1.0));
+  vec2 clampedUV = clamp(uv, epsilon, vec2(1.0) - epsilon);
+  return texture(uBackgroundTexture, clampedUV);
 }
 
-vec4 _sample_screen_clamped(vec2 uv) {
-    // Berechne Epsilon basierend auf Pixelgröße, um Kantenflimmern zu vermeiden
-    vec2 eps = vec2(0.5) / max(uSize, vec2(1.0));
-    vec2 clampedUV = clamp(uv, eps, vec2(1.0) - eps);
-    return texture(uBackgroundTexture, clampedUV);
-}
-
-
-// ───────────────────── 1D Blur Logic ───────────────────────────────────────
-vec4 _blur1D(vec2 baseUV){
-  vec2 invSize  = vec2(1.0) / max(uSize, vec2(1.0));
-  vec2 step_vec = vec2(u_dir_x * invSize.x, u_dir_y * invSize.y);
-
-  if (!(u_sample_count > 0.5)) {
-    return _sample_screen_clamped(baseUV);
-  }
-  int nS = int(u_sample_count + 0.5);
-
-  vec4 sum = vec4(0.0);
+// Applies a 1D Gaussian blur along the configured direction.
+// Aggregates weighted samples based on the provided kernel and configuration.
+vec4 applyDirectionalBlur(vec2 baseUV) {
+  float sampleCount = uBlurConfiguration.z;
   
-  // UNROLL FRIENDLY LOOP
-  for (int i = 0; i < 24; ++i) {
-    if (i >= nS) break;
-    float t = u_samples[i].x;
-    float w = u_samples[i].z;
-    
-    // Einfach Sample + Weight. Kein If, kein TileMode Call.
-    sum += w * _sample_screen_clamped(baseUV + step_vec * t);
+  if (sampleCount <= 0.5) {
+    return sampleTextureSafe(baseUV);
   }
-  return sum;
+
+  vec2 inverseSize = vec2(1.0) / max(uViewSize, vec2(1.0));
+  vec2 directionStep = vec2(
+    uBlurConfiguration.x * inverseSize.x, 
+    uBlurConfiguration.y * inverseSize.y
+  );
+
+  int count = int(sampleCount + 0.5);
+  vec4 accumulatedColor = vec4(0.0);
+
+  for (int i = 0; i < 24; ++i) {
+    if (i >= count) {
+      break;
+    }
+    float offset = uBlurKernel[i].x;
+    float weight = uBlurKernel[i].z;
+    accumulatedColor += weight * sampleTextureSafe(baseUV + directionStep * offset);
+  }
+
+  return accumulatedColor;
 }
-// ───────────────────── SDF Include ─────────────────────────────────────────
+
 #include "lg_union_sdf.glsl"
 
-// ───────────────────── Main ────────────────────────────────────────────────
-void main(){
-  vec2 pScreen = FlutterFragCoord().xy;
-  vec2 invSize = vec2(1.0) / max(uSize, vec2(1.0));
-  vec2 uv = pScreen * invSize;
+// Resolves the texture coordinates relative to the screen size.
+// Handles coordinate flipping for OpenGL ES targets if necessary.
+vec2 resolveTextureCoordinates(vec2 screenPosition) {
+  vec2 inverseSize = vec2(1.0) / max(uViewSize, vec2(1.0));
+  vec2 uv = screenPosition * inverseSize;
 
   #ifdef IMPELLER_TARGET_OPENGLES
   uv.y = 1.0 - uv.y;
   #endif
 
-  vec2 p = pScreen; 
+  return uv;
+}
 
-  int dummyIdx;
-  float sd = sceneSDF_withIndex_fast(p, dummyIdx);
-  float mask = lg_foreground_alpha(sd);
+void main() {
+  vec2 screenPosition = FlutterFragCoord().xy;
+  vec2 uv = resolveTextureCoordinates(screenPosition);
+  
+  // The SDF index variable required by the fast calculation signature.
+  int shapeIndex;
+  float signedDistance = sceneSDF_withIndex_fast(screenPosition, shapeIndex);
+  float alphaMask = lg_foreground_alpha(signedDistance);
 
-  vec4 src = _sample_screen_clamped(uv);
+  vec4 sourceColor = sampleTextureSafe(uv);
 
-  if (mask < 0.001) {
-    fragColor = src;
+  if (alphaMask < 0.001) {
+    fragColor = sourceColor;
     return;
   }
 
-  vec4 blurred = _blur1D(uv);
-  fragColor = mix(src, blurred, mask);
+  vec4 blurredColor = applyDirectionalBlur(uv);
+  fragColor = mix(sourceColor, blurredColor, alphaMask);
 }

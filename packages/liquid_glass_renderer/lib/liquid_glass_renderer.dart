@@ -1,4 +1,7 @@
-/// Liquid Glass Effect for Flutter
+/// A high-fidelity liquid glass rendering library for Flutter.
+///
+/// This library provides widgets and rendering logic to create realistic
+/// 'Liquid Glass' effects.
 library liquid_glass_renderer;
 
 export 'src/background_child_sampler.dart'
