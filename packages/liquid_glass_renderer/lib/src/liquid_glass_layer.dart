@@ -9,6 +9,7 @@ import 'package:flutter_shaders/flutter_shaders.dart';
 
 import 'package:liquid_glass_renderer/src/background_child_sampler.dart';
 import 'package:liquid_glass_renderer/src/glass_link.dart';
+import 'package:liquid_glass_renderer/src/internal/transform_tracking_repaint_boundary_mixin.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_settings.dart';
 import 'package:liquid_glass_renderer/src/raw_shapes.dart';
@@ -263,7 +264,8 @@ typedef _ActiveShape = (
 /// This class handles the complex task of aggregating shape data from descendants,
 /// calculating blur kernels, uploading uniforms to the GPU, and applying the
 /// multipass shader effect.
-class RenderLiquidGlassLayer extends RenderProxyBox {
+class RenderLiquidGlassLayer extends RenderProxyBox
+    with TransformTrackingRenderObjectMixin {
   /// Creates a [RenderLiquidGlassLayer].
   RenderLiquidGlassLayer({
     required double devicePixelRatio,
@@ -431,7 +433,15 @@ class RenderLiquidGlassLayer extends RenderProxyBox {
   }
 
   @override
+  void onTransformChanged() {
+    // Wenn sich die globale Position ändert, müssen wir neu zeichnen,
+    // damit _uploadUniformsIfNeeded die neuen Koordinaten an den Shader schickt.
+    markNeedsPaint();
+  }
+
+  @override
   void paint(PaintingContext context, Offset offset) {
+    setUpLayer(offset);
     // 1. Collect Shapes (Fast, No Alloc)
     _collectShapes(_reusableShapeList);
     final List<_ActiveShape> shapes = _reusableShapeList;
