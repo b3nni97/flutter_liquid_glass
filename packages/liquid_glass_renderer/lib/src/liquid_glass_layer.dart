@@ -623,7 +623,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       union = (union == null) ? rectLocal : union.expandToInclude(rectLocal);
     }
     final Rect unionBounds = union ?? Rect.zero;
-    final double margin = (_settings.blur * 3.0) + _settings.thickness + 12.0;
+    final double margin = (_settings.blur * 3.0) + _settings.thickness;
     return unionBounds.inflate(margin);
   }
 
