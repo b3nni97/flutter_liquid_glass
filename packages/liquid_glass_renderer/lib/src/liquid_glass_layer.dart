@@ -256,7 +256,9 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
 typedef _ActiveShape = (
   RenderLiquidGlass renderObject,
   RawShape rawShape,
-  List<TouchPoint> touches
+  List<TouchPoint> touches,
+  Matrix4 transformToLayer,
+  Rect rectInLayer
 );
 
 /// The core [RenderObject] that performs the custom painting and shader management.
@@ -590,6 +592,14 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       if (ro is RenderLiquidGlass) {
         final Matrix4 toThis = ro.getTransformTo(this);
         final double scale = _getScaleFromTransform(toThis);
+
+        // Cache transformed bounds in layer space to avoid recomputing in
+        // _computeClipRect and _paintShapeContents.
+        final Rect rectLocal = MatrixUtils.transformRect(
+          toThis,
+          Offset.zero & ro.size,
+        );
+
         buffer.add((
           ro,
           RawShape.fromLiquidGlassShape(
@@ -599,6 +609,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
             scale: scale,
           ),
           ro.localTouches,
+          toThis,
+          rectLocal,
         ));
       }
     }
@@ -607,12 +619,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   Rect _computeClipRect(List<_ActiveShape> shapes) {
     Rect? union;
     for (final _ActiveShape shapeData in shapes) {
-      final RenderLiquidGlass ro = shapeData.$1;
-      final Matrix4 transformToThis = ro.getTransformTo(this);
-      final Rect rectLocal = MatrixUtils.transformRect(
-        transformToThis,
-        Offset.zero & ro.size,
-      );
+      final Rect rectLocal = shapeData.$5;
       union = (union == null) ? rectLocal : union.expandToInclude(rectLocal);
     }
     final Rect unionBounds = union ?? Rect.zero;
@@ -1076,7 +1083,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     for (final _ActiveShape s in shapes) {
       final RenderLiquidGlass ro = s.$1;
       if (ro.glassContainsChild == glassContainsChild) {
-        final Matrix4 transform = ro.getTransformTo(this);
+        final Matrix4 transform = s.$4;
         context.pushTransform(
           true,
           offset,
