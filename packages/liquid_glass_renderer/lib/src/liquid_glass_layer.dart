@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -18,13 +19,14 @@ import 'package:liquid_glass_renderer/src/shaders.dart';
 ///
 /// This widget allows descendant [LiquidGlass] widgets to register themselves
 /// with the shared coordination state, enabling the [LiquidGlassLayer] to
-/// aggregate shape data for the shader effect.
+/// aggregate shape data for the shader effect. It acts as the bridge between
+/// the rendering layer and the individual glass items distributed in the tree.
 class GlassScope extends InheritedWidget {
   /// Creates a [GlassScope] that provides a [GlassLink] to its descendants.
   const GlassScope({
+    super.key,
     required this.link,
     required super.child,
-    super.key,
   });
 
   /// The synchronization object used to coordinate glass shapes and effects.
@@ -53,7 +55,8 @@ class GlassScope extends InheritedWidget {
 /// A configuration object representing a touch interaction point on the glass.
 ///
 /// Defines the physical properties of a touch that interacts with the glass
-/// surface, including its radius, fade-out distance, and glow intensity.
+/// surface. These values are uploaded to the fragment shader to distort normals
+/// and calculate glow intensity based on distance fields.
 @immutable
 class TouchPoint {
   /// Creates a [TouchPoint] configuration.
@@ -85,11 +88,11 @@ class TouchPoint {
 class LiquidGlassLayer extends StatefulWidget {
   /// Creates a [LiquidGlassLayer].
   const LiquidGlassLayer({
+    super.key,
     this.settings = const LiquidGlassSettings(),
     this.restrictThickness = true,
     this.backgroundChildBuilder,
     required this.child,
-    super.key,
   });
 
   /// Global settings applied to the liquid glass effect.
@@ -257,17 +260,18 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
   }
 }
 
-/// A record definition for an active glass shape.
+/// A mutable class definition for an active glass shape.
 ///
 /// Contains the render object, raw geometry, touch points, and layout information
-/// required for processing a shape in the shader pipeline.
-typedef _ActiveShape = (
-  RenderLiquidGlass renderObject,
-  RawShape rawShape,
-  List<TouchPoint> touches,
-  Matrix4 transformToLayer,
-  Rect rectInLayer
-);
+/// required for processing a shape in the shader pipeline. Used to cache
+/// transformation results between layout and paint phases.
+class _ActiveShape {
+  RenderLiquidGlass? renderObject;
+  RawShape shape = RawShape.none;
+  List<TouchPoint> touches = const <TouchPoint>[];
+  Matrix4 transform = Matrix4.identity();
+  Rect rect = Rect.zero;
+}
 
 /// The core [RenderObject] that performs the custom painting and shader management.
 ///
@@ -330,7 +334,10 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
   final LayerHandle<BackdropFilterLayer> _backdropHandle =
       LayerHandle<BackdropFilterLayer>();
+
+  // Reuse instances of _ActiveShape to prevent GC pressure
   final List<_ActiveShape> _reusableShapeList = <_ActiveShape>[];
+
   final List<_OwnedTouch> _reusableTouchList = <_OwnedTouch>[];
   final Float64List _matrixBuffer = Matrix4.identity().storage;
   final List<_OwnedTouch> _lastUploadedTouches = <_OwnedTouch>[];
@@ -558,7 +565,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   }
 
   void _collectShapes(List<_ActiveShape> buffer) {
-    buffer.clear();
+    // Instead of clearing and re-allocating tuples, we overwrite existing objects.
     final List<ComputedShapeInfo> computed = _glassLink.computedShapes;
 
     if (computed.length > _maxShapesPerLayer) {
@@ -569,39 +576,51 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       return;
     }
 
+    int writeIndex = 0;
     for (final ComputedShapeInfo s in computed) {
       final RenderObject? ro = s.renderObject;
       if (ro is RenderLiquidGlass) {
         final Matrix4 toThis = ro.getTransformTo(this);
         final double scale = _getScaleFromTransform(toThis);
 
-        // Cache transformed bounds in layer space to avoid recomputing in
-        // _computeClipRect and _paintShapeContents.
+        // Cache transformed bounds in layer space
         final Rect rectLocal = MatrixUtils.transformRect(
           toThis,
           Offset.zero & ro.size,
         );
 
-        buffer.add((
-          ro,
-          RawShape.fromLiquidGlassShape(
-            s.shape,
-            center: rectLocal.center,
-            size: rectLocal.size,
-            scale: scale,
-          ),
-          ro.localTouches,
-          toThis,
-          rectLocal,
-        ));
+        // Ensure we have a mutable container
+        if (writeIndex >= buffer.length) {
+          buffer.add(_ActiveShape());
+        }
+
+        final _ActiveShape active = buffer[writeIndex];
+        active.renderObject = ro;
+        active.shape = RawShape.fromLiquidGlassShape(
+          s.shape,
+          center: rectLocal.center,
+          size: rectLocal.size,
+          scale: scale,
+        );
+        active.touches = ro.localTouches;
+        active.transform = toThis;
+        active.rect = rectLocal;
+
+        writeIndex++;
       }
+    }
+
+    // Truncate the buffer conceptually by adjusting length,
+    // effectively removing stale shapes from the iteration list.
+    if (buffer.length > writeIndex) {
+      buffer.length = writeIndex;
     }
   }
 
   Rect _computeClipRect(List<_ActiveShape> shapes) {
     Rect? union;
     for (final _ActiveShape shapeData in shapes) {
-      final Rect rectLocal = shapeData.$5;
+      final Rect rectLocal = shapeData.rect;
       union = (union == null) ? rectLocal : union.expandToInclude(rectLocal);
     }
     final Rect unionBounds = union ?? Rect.zero;
@@ -709,7 +728,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   bool _shapesChanged(List<_ActiveShape> shapes) {
     if (_lastShapes == null || _lastShapes!.length != shapes.length) {
       _lastShapes =
-          shapes.map((_ActiveShape e) => e.$2).toList(growable: false);
+          shapes.map((_ActiveShape e) => e.shape).toList(growable: false);
       return true;
     }
 
@@ -719,7 +738,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
     for (int i = 0; i < shapes.length; i++) {
       final RawShape a = last[i];
-      final RawShape b = shapes[i].$2;
+      final RawShape b = shapes[i].shape;
 
       if (a.type != b.type ||
           (a.center - b.center).distanceSquared > eps2 ||
@@ -734,7 +753,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
     if (changed) {
       _lastShapes =
-          shapes.map((_ActiveShape e) => e.$2).toList(growable: false);
+          shapes.map((_ActiveShape e) => e.shape).toList(growable: false);
     }
     return changed;
   }
@@ -809,7 +828,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     double thickness = _settings.thickness;
     if (_restrictThickness && shapes.isNotEmpty) {
       final double smallest = shapes
-          .map((_ActiveShape e) => e.$2.size.shortestSide)
+          .map((_ActiveShape e) => e.shape.size.shortestSide)
           .reduce((double a, double b) => math.min(a, b));
       thickness = math.min(thickness, smallest);
     }
@@ -861,7 +880,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     int baseIndex,
   ) {
     for (int i = 0; i < count; i++) {
-      final RawShape shape = i < shapes.length ? shapes[i].$2 : RawShape.none;
+      final RawShape shape =
+          i < shapes.length ? shapes[i].shape : RawShape.none;
       final int base = baseIndex + (i * _shapeStride);
       targetShader
         ..setFloat(base + 0, shape.type.index.toDouble())
@@ -974,7 +994,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     }
 
     for (int i = 0; i < shapes.length; i++) {
-      final GlowStyle activeStyle = shapes[i].$1.glow ?? _settings.glowStyle;
+      final GlowStyle activeStyle =
+          shapes[i].renderObject?.glow ?? _settings.glowStyle;
       final int baseIdx = _idxShapeGlowData + (i * 16);
 
       if (!activeStyle.enabled) {
@@ -1022,7 +1043,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   ) {
     buffer.clear();
     for (int i = 0; i < shapes.length; i++) {
-      final List<TouchPoint> localTouches = shapes[i].$3;
+      final List<TouchPoint> localTouches = shapes[i].touches;
       if (localTouches.isEmpty) continue;
 
       for (final TouchPoint lt in localTouches) {
@@ -1048,9 +1069,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     required bool glassContainsChild,
   }) {
     for (final _ActiveShape s in shapes) {
-      final RenderLiquidGlass ro = s.$1;
-      if (ro.glassContainsChild == glassContainsChild) {
-        final Matrix4 transform = s.$4;
+      final RenderLiquidGlass? ro = s.renderObject;
+      if (ro != null && ro.glassContainsChild == glassContainsChild) {
+        final Matrix4 transform = s.transform;
         context.pushTransform(
           true,
           offset,
@@ -1088,6 +1109,8 @@ class _GaussianKernelGenerator {
   static const double _maxSigma = 500.0;
   static const double _sqrt3 = 1.7320508075688772;
 
+  // Scales the sigma value to approximate the visual falloff of a standard
+  // Gaussian blur within the shader's specific implementation limits.
   static double _scaleSigma(double s) {
     final double ss = s.clamp(0.0, _maxSigma);
     const double a = 3.4e-06;
@@ -1096,6 +1119,7 @@ class _GaussianKernelGenerator {
     return ss * (c + b * ss + a * ss * ss);
   }
 
+  // Converts a sigma value to a kernel radius.
   static double _sigmaToRadius(double sigma) {
     return sigma > 0.5 ? (sigma - 0.5) * _sqrt3 : 0.0;
   }
@@ -1152,6 +1176,7 @@ class _GaussianKernelGenerator {
     return out;
   }
 
+  /// Computes the packed Gaussian kernel samples for the given sigma.
   static List<_PackedSample> computeImpellerKernel(double sigmaPx) {
     final double scaled = _scaleSigma(sigmaPx);
     final int r = _sigmaToRadius(scaled).round();
