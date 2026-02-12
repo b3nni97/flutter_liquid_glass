@@ -1,6 +1,6 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
-import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -17,8 +17,9 @@ import 'package:liquid_glass_renderer/src/shaders.dart';
 
 /// An inherited widget that exposes the [GlassLink] to the subtree.
 ///
-/// This widget allows descendant widgets to access the shared [GlassLink] state
-/// required for coordinating liquid glass effects.
+/// This widget allows descendant [LiquidGlass] widgets to register themselves
+/// with the shared coordination state, enabling the [LiquidGlassLayer] to
+/// aggregate shape data for the shader effect.
 class GlassScope extends InheritedWidget {
   /// Creates a [GlassScope] that provides a [GlassLink] to its descendants.
   const GlassScope({
@@ -27,19 +28,19 @@ class GlassScope extends InheritedWidget {
     super.key,
   });
 
-  /// The link object used to synchronize glass shapes and effects.
+  /// The synchronization object used to coordinate glass shapes and effects.
   final GlassLink link;
 
   /// Retrieves the [GlassLink] from the nearest [GlassScope] ancestor.
   ///
-  /// Returns null if no [GlassScope] is found.
+  /// Returns null if no [GlassScope] is found in the provided context.
   static GlassLink? maybeOf(BuildContext context) {
     return context.dependOnInheritedWidgetOfExactType<GlassScope>()?.link;
   }
 
   /// Retrieves the [GlassLink] from the nearest [GlassScope] ancestor.
   ///
-  /// Throws an assertion error if no [GlassScope] is found.
+  /// Throws a [FlutterError] if no [GlassScope] is found.
   static GlassLink of(BuildContext context) {
     final GlassLink? result = maybeOf(context);
     assert(result != null, 'No GlassScope found in context');
@@ -52,8 +53,8 @@ class GlassScope extends InheritedWidget {
 
 /// A configuration object representing a touch interaction point on the glass.
 ///
-/// Defines the position and visual properties of a touch effect, such as
-/// radius, fade distance, and glow intensity.
+/// Defines the physical properties of a touch that interacts with the glass
+/// surface, including its radius, fade-out distance, and glow intensity.
 @immutable
 class TouchPoint {
   /// Creates a [TouchPoint] configuration.
@@ -80,31 +81,37 @@ class TouchPoint {
 /// A compositing layer that renders multiple [LiquidGlass] shapes with optical effects.
 ///
 /// This widget manages the shader pipeline required to render liquid glass,
-/// including refraction, blur, and lighting effects. It acts as a container
-/// for [LiquidGlass] widgets.
+/// including refraction, blur, lighting, and touch interactions. It acts as
+/// the rendering root for all descendant [LiquidGlass] widgets.
 class LiquidGlassLayer extends StatefulWidget {
   /// Creates a [LiquidGlassLayer].
   const LiquidGlassLayer({
-    required this.child,
     this.settings = const LiquidGlassSettings(),
     this.restrictThickness = true,
     this.backgroundChildBuilder,
+    required this.child,
     super.key,
   });
-
-  /// The widget tree that contains the [LiquidGlass] shapes to be rendered.
-  final Widget child;
-
-  /// An optional builder for rendering content behind the glass layer.
-  ///
-  /// This is used to sample colors for refraction and background blur.
-  final LiquidGlassBackgroundChildBuilder? backgroundChildBuilder;
 
   /// Global settings applied to the liquid glass effect.
   final LiquidGlassSettings settings;
 
   /// Whether to clamp the thickness of the glass to the smallest dimension of the shapes.
+  ///
+  /// Prevents visual artifacts when thickness exceeds the physical size of a shape.
   final bool restrictThickness;
+
+  /// An optional builder for rendering a custom background texture.
+  ///
+  /// This texture is sampled by the shader and composited over the backdrop.
+  /// Unlike the standard backdrop, this content is:
+  /// - Affected by refraction (creating the "object in glass" effect).
+  /// - NOT affected by blur or scaling settings.
+  /// - Blended onto the backdrop using custom shader logic.
+  final LiquidGlassBackgroundChildBuilder? backgroundChildBuilder;
+
+  /// The widget tree that contains the [LiquidGlass] shapes to be rendered.
+  final Widget child;
 
   @override
   State<LiquidGlassLayer> createState() => _LiquidGlassLayerState();
@@ -116,7 +123,7 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
 
   @override
   Widget build(BuildContext context) {
-    if (!ImageFilter.isShaderFilterSupported) {
+    if (!ui.ImageFilter.isShaderFilterSupported) {
       return widget.child;
     }
 
@@ -175,11 +182,11 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
 
 /// A helper class to manage the lifecycle of the background image and its key color.
 ///
-/// This class ensures that the image resource is properly disposed of when replaced
-/// or when the holder itself is disposed.
+/// Encapsulates the logic for updating, holding, and disposing the [ui.Image]
+/// used for refraction, ensuring resource safety.
 class _ImageHolder {
   ui.Image? _image;
-  Color _keyColor = const Color(0xFFFFFFFF); // Defaults to white.
+  Color _keyColor = const Color(0xFFFFFFFF);
 
   /// The current background image used for refraction/reflection.
   ui.Image? get image => _image;
@@ -251,8 +258,10 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
   }
 }
 
-/// A record definition for an active glass shape, including its render object,
-/// raw geometry, and associated touch points.
+/// A record definition for an active glass shape.
+///
+/// Contains the render object, raw geometry, touch points, and layout information
+/// required for processing a shape in the shader pipeline.
 typedef _ActiveShape = (
   RenderLiquidGlass renderObject,
   RawShape rawShape,
@@ -263,9 +272,8 @@ typedef _ActiveShape = (
 
 /// The core [RenderObject] that performs the custom painting and shader management.
 ///
-/// This class handles the complex task of aggregating shape data from descendants,
-/// calculating blur kernels, uploading uniforms to the GPU, and applying the
-/// multipass shader effect.
+/// This class handles aggregating shape data from descendants, calculating blur
+/// kernels, managing GPU uniforms, and applying the multi-pass shader effect.
 class RenderLiquidGlassLayer extends RenderProxyBox
     with TransformTrackingRenderObjectMixin {
   /// Creates a [RenderLiquidGlassLayer].
@@ -290,7 +298,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     _initHBlurInvariants();
   }
 
-  // Main Shader Indices
   static const int _idxGlassColor = 2;
   static const int _idxOpticalProps = 6;
   static const int _idxLightConfig = 10;
@@ -300,44 +307,34 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   static const int _idxRimParams = 34;
   static const int _idxShapeData = 36;
   static const int _shapeStride = 7;
-
-  // Main Shader Blur Header (Vertical Pass)
   static const int _idxBlurBase = 92;
   static const int _idxBlurSamples = 96;
-
-  // Touch & Glow
   static const int _idxTouchCount = 192;
   static const int _idxTouches = 193;
   static const int _idxTouchOwners = 209;
   static const int _idxGlobalBlurSigma = 213;
   static const int _idxTouchGlowStrengths = 214;
   static const int _idxShapeGlowData = 218;
-
-  // Projection
   static const int _idxBgScale = 346;
   static const int _idxNormalParams = 348;
   static const int _idxChildProjection = 350;
   static const int _idxChildSize = 354;
   static const int _idxKeyColor = 356;
-
-  // Blur Shader Indices
-  // uSize(0) -> uOpticalProps(2) -> uColorAdjust(6)
   static const int _blurIdxOpticalProps = 2;
   static const int _blurIdxColorAdjust = 6;
-
-  // uTransform removed. ShapeData follows directly.
   static const int _blurIdxShapeData = 8;
-
-  // 8 Shapes * 7 = 56. 8 + 56 = 64.
   static const int _blurIdxHeader = 64;
   static const int _blurIdxSamples = 68;
-
   static const int _maxShapesPerLayer = 8;
   static const int _maxTouchesPerLayer = 4;
   static const double _epsilon = 0.01;
 
   final LayerHandle<BackdropFilterLayer> _backdropHandle =
       LayerHandle<BackdropFilterLayer>();
+  final List<_ActiveShape> _reusableShapeList = <_ActiveShape>[];
+  final List<_OwnedTouch> _reusableTouchList = <_OwnedTouch>[];
+  final Float64List _matrixBuffer = Matrix4.identity().storage;
+  final List<_OwnedTouch> _lastUploadedTouches = <_OwnedTouch>[];
 
   double _devicePixelRatio;
   FragmentShader _shader;
@@ -348,7 +345,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   Size _viewportSize;
   GlassLink _glassLink;
 
-  // --- Caching State for Dirty Checks ---
   List<RawShape>? _lastShapes;
   LiquidGlassSettings? _lastSettings;
   int _lastShapeCount = -1;
@@ -359,24 +355,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   int _lastTextureHeight = -1;
   double _lastDPR = -1;
   Color? _lastUploadedKeyColor;
-
-  // Touch State Copy for diffing
-  final List<_OwnedTouch> _lastUploadedTouches = <_OwnedTouch>[];
-
-  // Kernel Cache
   List<_PackedSample>? _cachedKernel;
   int _cachedSigmaBucketKernel = -1;
   int _lastKernelCountH = -1;
   int _lastKernelCountV = -1;
-
-  // Reuse Buffers (Allocation Free Paint)
-  final List<_ActiveShape> _reusableShapeList = <_ActiveShape>[];
-  final List<_OwnedTouch> _reusableTouchList = <_OwnedTouch>[];
-  final Float64List _matrixBuffer = Matrix4.identity().storage;
-
   bool _hInvariantsInitialized = false;
 
-  // Mutable Properties
   set devicePixelRatio(double value) {
     if (_devicePixelRatio == value) return;
     _devicePixelRatio = value;
@@ -436,8 +420,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
   @override
   void onTransformChanged() {
-    // Wenn sich die globale Position ändert, müssen wir neu zeichnen,
-    // damit _uploadUniformsIfNeeded die neuen Koordinaten an den Shader schickt.
     markNeedsPaint();
   }
 
@@ -445,16 +427,15 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   void paint(PaintingContext context, Offset offset) {
     setUpLayer(offset);
 
-    // Calculate transforms ONCE (Szenario B: Efficient calculation for both touches and clipping)
+    // Calculate transforms
     final Matrix4 toGlobal = getTransformTo(null);
     final Matrix4 globalToLocal = Matrix4.inverted(toGlobal);
 
-    // 1. Collect Shapes (Fast, No Alloc)
     _collectShapes(_reusableShapeList);
     final List<_ActiveShape> shapes = _reusableShapeList;
 
-    if (_settings.thickness <= 0 || shapes.isEmpty) {
-      _lastShapes = null; // Clear cache
+    if (_settings.thickness <= 0.0 || shapes.isEmpty) {
+      _lastShapes = null;
       _backdropHandle.layer = null;
       _paintShapeContents(context, offset, shapes, glassContainsChild: true);
       _paintShapeContents(context, offset, shapes, glassContainsChild: false);
@@ -465,30 +446,19 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     final int shapeCount = math.min(_maxShapesPerLayer, shapes.length);
     final double sigmaPx = _settings.blur * _devicePixelRatio;
 
-    // Kernel calculation (Cached internally)
     final List<_PackedSample> kernel = _getKernelAndMark(sigmaPx);
     final int nKernel =
         math.min(_GaussianKernelGenerator.maxKernelSize, kernel.length);
 
-    // 2. Collect Touches (Fast, No Alloc)
-    // Pass the globalToLocal matrix to transform global touch points to local space
     _combineTouches(shapes, _reusableTouchList, globalToLocal);
     final List<_OwnedTouch> ownedTouches = _reusableTouchList;
 
-    // Compute geometry
     Rect clipBounds = _computeClipRect(shapes);
-
-    // Viewport in this render object's local space (using the pre-calculated matrix)
     final Rect globalViewport = Offset.zero & _viewportSize;
     final Rect viewportInLayer =
         MatrixUtils.transformRect(globalToLocal, globalViewport);
 
-    // Clamp & Snap
     clipBounds = clipBounds.intersect(viewportInLayer);
-
-    // Optional: Early exit if fully clipped?
-    // if (clipBounds.isEmpty) { ... }
-
     clipBounds = _snapBoundsForBackdrop(clipBounds, offset);
     clipBounds = clipBounds.intersect(viewportInLayer);
 
@@ -515,14 +485,14 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     // Paint Pass 1: Shapes that contain their own children within the glass
     _paintShapeContents(context, offset, shapes, glassContainsChild: true);
 
-    ImageFilter composedFilter;
+    ui.ImageFilter composedFilter;
     if (sigmaPx > 0.01 && nKernel > 0) {
-      composedFilter = ImageFilter.compose(
-        outer: ImageFilter.shader(_shader),
-        inner: ImageFilter.shader(_blurH),
+      composedFilter = ui.ImageFilter.compose(
+        outer: ui.ImageFilter.shader(_shader),
+        inner: ui.ImageFilter.shader(_blurH),
       );
     } else {
-      composedFilter = ImageFilter.shader(_shader);
+      composedFilter = ui.ImageFilter.shader(_shader);
     }
 
     final BackdropFilterLayer backdropLayer =
@@ -561,10 +531,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     _backdropHandle.layer = null;
     super.dispose();
   }
-
-  // ===========================================================================
-  // Private Methods
-  // ===========================================================================
 
   void _onGlassLinkChanged() => markNeedsPaint();
 
@@ -1061,7 +1027,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       if (localTouches.isEmpty) continue;
 
       for (final TouchPoint lt in localTouches) {
-        // Transform the global touch position into the local coordinate space of this layer
+        // Transform the global touch position into the local coordinate space of this layer.
         final Offset pLocal =
             MatrixUtils.transformPoint(globalToLocal, lt.position);
 
@@ -1099,7 +1065,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
 /// An immutable representation of a touch point with its owner index.
 ///
-/// Used internally to map touches to specific glass shapes.
+/// Used internally to map touches to specific glass shapes during the shader
+/// upload process.
 class _OwnedTouch {
   const _OwnedTouch({
     required this.position,
@@ -1134,8 +1101,11 @@ class _GaussianKernelGenerator {
     return sigma > 0.5 ? (sigma - 0.5) * _sqrt3 : 0.0;
   }
 
-  static List<_RawSample> _genRaw(double blurSigma, int radius,
-      {int step = 1}) {
+  static List<_RawSample> _genRaw(
+    double blurSigma,
+    int radius, {
+    int step = 1,
+  }) {
     final List<_RawSample> out = <_RawSample>[];
     int count = ((2 * radius) ~/ step) + 1;
     int xOff = 0;
