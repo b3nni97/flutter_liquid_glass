@@ -444,6 +444,11 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   @override
   void paint(PaintingContext context, Offset offset) {
     setUpLayer(offset);
+
+    // Calculate transforms ONCE (Szenario B: Efficient calculation for both touches and clipping)
+    final Matrix4 toGlobal = getTransformTo(null);
+    final Matrix4 globalToLocal = Matrix4.inverted(toGlobal);
+
     // 1. Collect Shapes (Fast, No Alloc)
     _collectShapes(_reusableShapeList);
     final List<_ActiveShape> shapes = _reusableShapeList;
@@ -466,15 +471,27 @@ class RenderLiquidGlassLayer extends RenderProxyBox
         math.min(_GaussianKernelGenerator.maxKernelSize, kernel.length);
 
     // 2. Collect Touches (Fast, No Alloc)
-    _combineTouches(shapes, _reusableTouchList);
+    // Pass the globalToLocal matrix to transform global touch points to local space
+    _combineTouches(shapes, _reusableTouchList, globalToLocal);
     final List<_OwnedTouch> ownedTouches = _reusableTouchList;
 
     // Compute geometry
     Rect clipBounds = _computeClipRect(shapes);
-    clipBounds = _snapBoundsForBackdrop(
-        _clampBoundsToViewport(clipBounds, offset), offset);
 
-    // 3. Smart Upload
+    // Viewport in this render object's local space (using the pre-calculated matrix)
+    final Rect globalViewport = Offset.zero & _viewportSize;
+    final Rect viewportInLayer =
+        MatrixUtils.transformRect(globalToLocal, globalViewport);
+
+    // Clamp & Snap
+    clipBounds = clipBounds.intersect(viewportInLayer);
+
+    // Optional: Early exit if fully clipped?
+    // if (clipBounds.isEmpty) { ... }
+
+    clipBounds = _snapBoundsForBackdrop(clipBounds, offset);
+    clipBounds = clipBounds.intersect(viewportInLayer);
+
     _uploadUniformsIfNeeded(
       shapeCount: shapeCount,
       shapes: shapes,
@@ -604,8 +621,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
           ro,
           RawShape.fromLiquidGlassShape(
             s.shape,
-            center: s.globalBounds.center,
-            size: s.globalBounds.size,
+            center: rectLocal.center,
+            size: rectLocal.size,
             scale: scale,
           ),
           ro.localTouches,
@@ -625,25 +642,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     final Rect unionBounds = union ?? Rect.zero;
     final double margin = (_settings.blur * 3.0) + _settings.thickness;
     return unionBounds.inflate(margin);
-  }
-
-  Rect _clampBoundsToViewport(Rect bounds, Offset layerOffset) {
-    final Rect global = bounds.shift(layerOffset);
-    final Rect viewport = Offset.zero & _viewportSize;
-
-    final double clampedLeft = global.left.clamp(viewport.left, viewport.right);
-    final double clampedTop = global.top.clamp(viewport.top, viewport.bottom);
-    final double clampedRight =
-        global.right.clamp(viewport.left, viewport.right);
-    final double clampedBottom =
-        global.bottom.clamp(viewport.top, viewport.bottom);
-
-    if (clampedRight <= clampedLeft || clampedBottom <= clampedTop) {
-      return Rect.zero;
-    }
-
-    return Rect.fromLTRB(clampedLeft, clampedTop, clampedRight, clampedBottom)
-        .shift(-layerOffset);
   }
 
   Rect _snapBoundsForBackdrop(Rect clipBounds, Offset paintOffset) {
@@ -713,8 +711,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
     // A. Projection & Transform
     if (geometryChanged) {
-      _uploadProjectionUniforms(bounds, offset, texW, texH);
-      _uploadTransformUniforms(bounds, offset);
+      _uploadProjectionUniforms(bounds, texW, texH);
+      _uploadTransformUniforms(bounds);
 
       _lastClipBounds = bounds;
       _lastPaintOffset = offset;
@@ -739,7 +737,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       _uploadTouchAndGlow(ownedTouches, shapes);
       _updateLastTouches(ownedTouches);
     }
-
     // D. Blur (Internal optimization handles redundancy)
     _uploadBlurKernels(nKernel, kernel);
   }
@@ -813,7 +810,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
   void _uploadProjectionUniforms(
     Rect bounds,
-    Offset offset,
     int texW,
     int texH,
   ) {
@@ -913,12 +909,10 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     }
   }
 
-  void _uploadTransformUniforms(Rect bounds, Offset offset) {
+  void _uploadTransformUniforms(Rect bounds) {
     // Calculate precise physical position (Integer Snapped)
-    final double txPx =
-        ((bounds.left + offset.dx) * _devicePixelRatio).roundToDouble();
-    final double tyPx =
-        ((bounds.top + offset.dy) * _devicePixelRatio).roundToDouble();
+    final double txPx = (bounds.left * _devicePixelRatio).roundToDouble();
+    final double tyPx = (bounds.top * _devicePixelRatio).roundToDouble();
 
     // Optimization: Write directly to buffer without Matrix4 object allocation
     // Matrix4 is Column-Major. Translation is at index 12 (x), 13 (y).
@@ -1056,15 +1050,23 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     _shader.setFloat(_idxGlobalBlurSigma, _settings.blur * _devicePixelRatio);
   }
 
-  void _combineTouches(List<_ActiveShape> shapes, List<_OwnedTouch> buffer) {
+  void _combineTouches(
+    List<_ActiveShape> shapes,
+    List<_OwnedTouch> buffer,
+    Matrix4 globalToLocal,
+  ) {
     buffer.clear();
     for (int i = 0; i < shapes.length; i++) {
       final List<TouchPoint> localTouches = shapes[i].$3;
       if (localTouches.isEmpty) continue;
 
       for (final TouchPoint lt in localTouches) {
+        // Transform the global touch position into the local coordinate space of this layer
+        final Offset pLocal =
+            MatrixUtils.transformPoint(globalToLocal, lt.position);
+
         buffer.add(_OwnedTouch(
-          position: lt.position,
+          position: pLocal,
           radiusPx: lt.radiusPx,
           fadePx: lt.fadePx,
           glowStrength: lt.glowStrength,
