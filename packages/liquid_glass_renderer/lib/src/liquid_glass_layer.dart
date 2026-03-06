@@ -123,6 +123,27 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
   final _ImageHolder _reflectionImageHolder = _ImageHolder();
   final GlassLink _glassLink = GlassLink();
 
+  static final ui.Image _emptySamplerImage =
+      createTransparentFallbackImageSync();
+
+  static ui.Image createTransparentFallbackImageSync() {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    // 1x1 transparent
+    canvas.drawRect(
+      const Rect.fromLTWH(0, 0, 1, 1),
+      Paint()..color = const Color(0x00000000),
+    );
+
+    final picture = recorder.endRecording();
+    try {
+      return picture.toImageSync(1, 1);
+    } finally {
+      picture.dispose();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!ui.ImageFilter.isShaderFilterSupported) {
@@ -146,6 +167,7 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
               imageHolder: _reflectionImageHolder,
               viewportSize: viewportSize,
               link: _glassLink,
+              emptySamplerImage: _emptySamplerImage,
               child: widget.child,
             );
           },
@@ -219,6 +241,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
     required this.imageHolder,
     required this.viewportSize,
     required this.link,
+    required this.emptySamplerImage,
     required super.child,
   });
 
@@ -229,6 +252,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
   final _ImageHolder imageHolder;
   final Size viewportSize;
   final GlassLink link;
+  final ui.Image emptySamplerImage;
 
   @override
   RenderObject createRenderObject(BuildContext context) {
@@ -241,6 +265,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
       imageHolder: imageHolder,
       viewportSize: viewportSize,
       link: link,
+      emptySamplerImage: emptySamplerImage,
     );
   }
 
@@ -256,6 +281,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
       ..imageHolder = imageHolder
       ..viewportSize = viewportSize
       ..link = link
+      ..emptySamplerImage = emptySamplerImage
       ..setShaders(shader, blurH);
   }
 }
@@ -289,6 +315,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     required _ImageHolder imageHolder,
     required Size viewportSize,
     required GlassLink link,
+    required ui.Image emptySamplerImage,
   })  : _devicePixelRatio = devicePixelRatio,
         _shader = shader,
         _blurH = blurH,
@@ -296,7 +323,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
         _restrictThickness = restrictThickness,
         _imageHolder = imageHolder,
         _viewportSize = viewportSize,
-        _glassLink = link {
+        _glassLink = link,
+        _emptySamplerImage = emptySamplerImage {
     _glassLink.addListener(_onGlassLinkChanged);
     _initHBlurInvariants();
   }
@@ -350,6 +378,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   _ImageHolder _imageHolder;
   Size _viewportSize;
   GlassLink _glassLink;
+  ui.Image _emptySamplerImage;
 
   List<RawShape>? _lastShapes;
   LiquidGlassSettings? _lastSettings;
@@ -402,6 +431,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     _glassLink.removeListener(_onGlassLinkChanged);
     _glassLink = value;
     _glassLink.addListener(_onGlassLinkChanged);
+    markNeedsPaint();
+  }
+
+  set emptySamplerImage(ui.Image value) {
+    if (identical(_emptySamplerImage, value)) return;
+    _emptySamplerImage = value;
     markNeedsPaint();
   }
 
@@ -480,12 +515,10 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
     _uploadKeyColorUniform();
 
-    if (_imageHolder.image != null) {
-      try {
-        _shader.setImageSampler(1, _imageHolder.image!);
-      } catch (e) {
-        debugPrint('LiquidGlassLayer: Failed to set image sampler: $e');
-      }
+    try {
+      _shader.setImageSampler(1, _imageHolder.image ?? _emptySamplerImage);
+    } catch (e) {
+      debugPrint('LiquidGlassLayer: Failed to set image sampler: $e');
     }
 
     // Paint Pass 1: Shapes that contain their own children within the glass
