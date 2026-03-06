@@ -367,7 +367,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   final List<_ActiveShape> _reusableShapeList = <_ActiveShape>[];
 
   final List<_OwnedTouch> _reusableTouchList = <_OwnedTouch>[];
-  final Float64List _matrixBuffer = Matrix4.identity().storage;
   final List<_OwnedTouch> _lastUploadedTouches = <_OwnedTouch>[];
 
   double _devicePixelRatio;
@@ -389,6 +388,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   int _lastTextureWidth = -1;
   int _lastTextureHeight = -1;
   double _lastDPR = -1;
+  Matrix4? _lastToGlobal;
   Color? _lastUploadedKeyColor;
   List<_PackedSample>? _cachedKernel;
   int _cachedSigmaBucketKernel = -1;
@@ -511,6 +511,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       ownedTouches: ownedTouches,
       bounds: clipBounds,
       offset: offset,
+      toGlobal: toGlobal,
+      globalToLocal: globalToLocal,
     );
 
     _uploadKeyColorUniform();
@@ -701,6 +703,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     required List<_OwnedTouch> ownedTouches,
     required Rect bounds,
     required Offset offset,
+    required Matrix4 toGlobal,
+    required Matrix4 globalToLocal,
   }) {
     // 1. Context Changes
     final bool dprChanged = _devicePixelRatio != _lastDPR;
@@ -715,7 +719,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
         viewportChanged ||
         textureChanged ||
         bounds != _lastClipBounds ||
-        offset != _lastPaintOffset;
+        offset != _lastPaintOffset ||
+        _lastToGlobal != toGlobal;
 
     // 3. Content Changes
     final bool settingsChanged = _settings != _lastSettings;
@@ -728,8 +733,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
     // A. Projection & Transform
     if (geometryChanged) {
-      _uploadProjectionUniforms(bounds, texW, texH);
-      _uploadTransformUniforms(bounds);
+      _uploadProjectionUniforms(texW, texH, toGlobal);
+      _uploadTransformUniforms(globalToLocal);
 
       _lastClipBounds = bounds;
       _lastPaintOffset = offset;
@@ -737,6 +742,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       _lastTextureWidth = texW;
       _lastTextureHeight = texH;
       _lastDPR = _devicePixelRatio;
+      _lastToGlobal = toGlobal.clone();
     }
 
     // B. Material & Shapes
@@ -826,9 +832,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   }
 
   void _uploadProjectionUniforms(
-    Rect bounds,
     int texW,
     int texH,
+    Matrix4 toGlobal,
   ) {
     final double dpr = _devicePixelRatio;
     double calculatedOffX = 0.0;
@@ -837,16 +843,18 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     if (texW > 0 && texH > 0) {
       final double layerOriginInTexX = (texW - (size.width * dpr)) * 0.5;
       final double layerOriginInTexY = (texH - (size.height * dpr)) * 0.5;
-      final double startPixelX = layerOriginInTexX + (bounds.left * dpr);
-      final double startPixelY = layerOriginInTexY + (bounds.top * dpr);
+
+      final double globalOffsetX = toGlobal.storage[12] * dpr;
+      final double globalOffsetY = toGlobal.storage[13] * dpr;
+
+      final double startPixelX = layerOriginInTexX - globalOffsetX;
+      final double startPixelY = layerOriginInTexY - globalOffsetY;
       calculatedOffX = startPixelX / texW;
       calculatedOffY = startPixelY / texH;
     }
 
-    final double projScaleX =
-        bounds.width / (size.width > 0 ? size.width : 1.0);
-    final double projScaleY =
-        bounds.height / (size.height > 0 ? size.height : 1.0);
+    final double projScaleX = 1.0;
+    final double projScaleY = 1.0;
 
     _shader
       ..setFloat(_idxChildProjection + 0, calculatedOffX)
@@ -927,20 +935,19 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     }
   }
 
-  void _uploadTransformUniforms(Rect bounds) {
-    // Calculate precise physical position (Integer Snapped)
-    final double txPx = (bounds.left * _devicePixelRatio).roundToDouble();
-    final double tyPx = (bounds.top * _devicePixelRatio).roundToDouble();
+  void _uploadTransformUniforms(Matrix4 globalToLocal) {
+    final double dpr = _devicePixelRatio;
 
-    // Optimization: Write directly to buffer without Matrix4 object allocation
-    // Matrix4 is Column-Major. Translation is at index 12 (x), 13 (y).
-    _matrixBuffer[12] = txPx;
-    _matrixBuffer[13] = tyPx;
-    // z is already 0.0
+    final Matrix4 physicalGlobalToLocal = Matrix4.identity()
+      ..scale(dpr, dpr, 1.0)
+      ..multiply(globalToLocal)
+      ..scale(1.0 / dpr, 1.0 / dpr, 1.0);
+
+    final Float64List m = physicalGlobalToLocal.storage;
 
     // Send only to MAIN Shader
     for (int i = 0; i < 16; i++) {
-      _shader.setFloat(_idxTransform + i, _matrixBuffer[i]);
+      _shader.setFloat(_idxTransform + i, m[i]);
     }
   }
 
