@@ -356,6 +356,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   static const int _blurIdxShapeData = 8;
   static const int _blurIdxHeader = 64;
   static const int _blurIdxSamples = 68;
+  static const int _blurIdxTransform = 164;
   static const int _maxShapesPerLayer = 8;
   static const int _maxTouchesPerLayer = 4;
   static const double _epsilon = 0.01;
@@ -945,9 +946,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
     final Float64List m = physicalGlobalToLocal.storage;
 
-    // Send only to MAIN Shader
     for (int i = 0; i < 16; i++) {
       _shader.setFloat(_idxTransform + i, m[i]);
+      _blurH.setFloat(_blurIdxTransform + i, m[i]);
     }
   }
 

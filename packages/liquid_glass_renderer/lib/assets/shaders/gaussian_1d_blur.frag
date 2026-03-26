@@ -86,6 +86,9 @@ vec4 applyDirectionalBlur(vec2 baseUV) {
   return accumulatedColor;
 }
 
+// Transformation matrix for converting screen coordinates to local space.
+uniform mat4 uTransform;
+
 #include "lg_union_sdf.glsl"
 
 // Resolves the texture coordinates relative to the screen size.
@@ -105,9 +108,12 @@ void main() {
   vec2 screenPosition = FlutterFragCoord().xy;
   vec2 uv = resolveTextureCoordinates(screenPosition);
   
+  // Transform screen coordinates to local space for SDF
+  vec2 localPoint = (uTransform * vec4(screenPosition, 0.0, 1.0)).xy;
+  
   // The SDF index variable required by the fast calculation signature.
   int shapeIndex;
-  float signedDistance = sceneSDF_withIndex_fast(screenPosition, shapeIndex);
+  float signedDistance = sceneSDF_withIndex_fast(localPoint, shapeIndex);
   float alphaMask = lg_foreground_alpha(signedDistance);
 
   vec4 sourceColor = sampleTextureSafe(uv);
