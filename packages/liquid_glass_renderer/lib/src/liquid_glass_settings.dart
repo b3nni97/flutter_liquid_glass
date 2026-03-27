@@ -145,7 +145,7 @@ class LiquidGlassSettings with EquatableMixin {
     this.chromaticAberration = 0.0,
     this.blend = 6.0,
     this.lightAngle = pi / 4,
-    this.lightIntensity = 0.38,
+    this.lightIntensity = 0.25,
     this.ambientStrength = 0.4,
     this.refractiveIndex = 1.7,
     this.saturation = 2.5,

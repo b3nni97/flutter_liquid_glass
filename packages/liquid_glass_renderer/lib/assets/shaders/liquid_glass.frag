@@ -88,6 +88,9 @@ uniform vec2 uChildSize;
 /// Key color used for chroma keying or masking.
 uniform vec3 uKeyColor;
 
+/// The global opacity applied to the glass effect (0.0 to 1.0).
+uniform float uOpacity;
+
 /// The background scene texture.
 uniform sampler2D uBackgroundTexture;
 
@@ -226,6 +229,7 @@ void main() {
         uLightness,
         rimWidthPx,
         rimSharpness,
-        shapeIndex
+        shapeIndex,
+        uOpacity
     );
 }

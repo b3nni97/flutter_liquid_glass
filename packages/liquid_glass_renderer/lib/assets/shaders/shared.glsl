@@ -61,6 +61,10 @@
 #define GLOW_OWNER_FEATHER_PX 1.6
 #endif
 
+#ifndef LG_RIM_TOP_HIGHLIGHT_STRENGTH
+#define LG_RIM_TOP_HIGHLIGHT_STRENGTH 0.0
+#endif
+
 #define u_dir_x        (uBlurHeader.x)
 #define u_dir_y        (uBlurHeader.y)
 #define u_sample_count (uBlurHeader.z)
@@ -632,7 +636,7 @@ vec3 _calculateTotalLighting(
 
   float verticalAlign = -nXyNormalized.y;
   float t = clamp(verticalAlign * 0.5 + 0.5, 0.0, 1.0);
-  float highlightGradient = smoothstep(0.9, 1.0, t);
+  float highlightGradient = smoothstep(0.9, 1.0, t) * float(LG_RIM_TOP_HIGHLIGHT_STRENGTH);
 
   vec3 highlightColor = _computeAdaptiveHighlight(backgroundColor, 0.7);
 
@@ -810,11 +814,12 @@ vec4 renderLiquidGlass(
     float lightness,
     float rimWidthPixels,
     float rimSharp,
-    int shapeIndex
+    int shapeIndex,
+    float opacity
 ) {
   vec4 backgroundColor = _sampleTexture(backgroundTexture, screenUV);
 
-  if (foregroundAlpha < 0.001 || thickness < 0.01) {
+  if (foregroundAlpha < 0.001 || thickness < 0.01 || opacity < 0.001) {
     return backgroundColor;
   }
 
@@ -856,7 +861,7 @@ vec4 renderLiquidGlass(
   float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
   float rimAlpha = masks.band * edgeAlphaGain;
 
-  float mixAlpha = clamp(max(baseAlpha, rimAlpha), 0.0, 1.0);
+  float mixAlpha = clamp(max(baseAlpha, rimAlpha), 0.0, 1.0) * opacity;
 
   return mix(backgroundColor, outColor, mixAlpha);
 }

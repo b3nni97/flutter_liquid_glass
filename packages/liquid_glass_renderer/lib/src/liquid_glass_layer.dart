@@ -11,6 +11,7 @@ import 'package:liquid_glass_renderer/src/background_child_sampler.dart';
 import 'package:liquid_glass_renderer/src/glass_link.dart';
 import 'package:liquid_glass_renderer/src/internal/transform_tracking_repaint_boundary_mixin.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass.dart';
+import 'package:liquid_glass_renderer/src/liquid_glass_opacity.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_settings.dart';
 import 'package:liquid_glass_renderer/src/raw_shapes.dart';
 import 'package:liquid_glass_renderer/src/shaders.dart';
@@ -91,6 +92,7 @@ class LiquidGlassLayer extends StatefulWidget {
     super.key,
     this.settings = const LiquidGlassSettings(),
     this.restrictThickness = true,
+    this.opacity,
     this.backgroundChildBuilder,
     required this.child,
   });
@@ -102,6 +104,13 @@ class LiquidGlassLayer extends StatefulWidget {
   ///
   /// Prevents visual artifacts when thickness exceeds the physical size of a shape.
   final bool restrictThickness;
+
+  /// The opacity of the glass effect (0.0 to 1.0).
+  ///
+  /// When set, this overrides any inherited [GlassOpacityScope] value.
+  /// When null, the opacity from the nearest [GlassOpacityScope] ancestor
+  /// is used, defaulting to 1.0.
+  final double? opacity;
 
   /// An optional builder for rendering a custom background texture.
   ///
@@ -151,6 +160,8 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
     }
 
     final Size viewportSize = MediaQuery.sizeOf(context);
+    final double resolvedOpacity =
+        widget.opacity ?? GlassOpacityScope.maybeOf(context) ?? 1.0;
 
     // Load both shaders efficiently using nested builders.
     Widget layerContent = ShaderBuilder(
@@ -164,6 +175,7 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
               blurH: blurH,
               settings: widget.settings,
               restrictThickness: widget.restrictThickness,
+              opacity: resolvedOpacity,
               imageHolder: _reflectionImageHolder,
               viewportSize: viewportSize,
               link: _glassLink,
@@ -238,6 +250,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
     required this.blurH,
     required this.settings,
     required this.restrictThickness,
+    required this.opacity,
     required this.imageHolder,
     required this.viewportSize,
     required this.link,
@@ -249,6 +262,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
   final FragmentShader blurH;
   final LiquidGlassSettings settings;
   final bool restrictThickness;
+  final double opacity;
   final _ImageHolder imageHolder;
   final Size viewportSize;
   final GlassLink link;
@@ -262,6 +276,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
       blurH: blurH,
       settings: settings,
       restrictThickness: restrictThickness,
+      opacity: opacity,
       imageHolder: imageHolder,
       viewportSize: viewportSize,
       link: link,
@@ -278,6 +293,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
       ..devicePixelRatio = MediaQuery.devicePixelRatioOf(context)
       ..settings = settings
       ..restrictThickness = restrictThickness
+      ..opacity = opacity
       ..imageHolder = imageHolder
       ..viewportSize = viewportSize
       ..link = link
@@ -312,6 +328,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     required FragmentShader blurH,
     required LiquidGlassSettings settings,
     required bool restrictThickness,
+    required double opacity,
     required _ImageHolder imageHolder,
     required Size viewportSize,
     required GlassLink link,
@@ -321,6 +338,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
         _blurH = blurH,
         _settings = settings,
         _restrictThickness = restrictThickness,
+        _opacity = opacity,
         _imageHolder = imageHolder,
         _viewportSize = viewportSize,
         _glassLink = link,
@@ -351,6 +369,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   static const int _idxChildProjection = 350;
   static const int _idxChildSize = 354;
   static const int _idxKeyColor = 356;
+  static const int _idxOpacity = 359;
   static const int _blurIdxOpticalProps = 2;
   static const int _blurIdxColorAdjust = 6;
   static const int _blurIdxShapeData = 8;
@@ -375,6 +394,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   FragmentShader _blurH;
   LiquidGlassSettings _settings;
   bool _restrictThickness;
+  double _opacity;
   _ImageHolder _imageHolder;
   Size _viewportSize;
   GlassLink _glassLink;
@@ -391,6 +411,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   double _lastDPR = -1;
   Matrix4? _lastToGlobal;
   Color? _lastUploadedKeyColor;
+  double? _lastUploadedOpacity;
   List<_PackedSample>? _cachedKernel;
   int _cachedSigmaBucketKernel = -1;
   int _lastKernelCountH = -1;
@@ -412,6 +433,13 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   set restrictThickness(bool value) {
     if (_restrictThickness == value) return;
     _restrictThickness = value;
+    markNeedsPaint();
+  }
+
+  set opacity(double value) {
+    if (_opacity == value) return;
+    debugPrint('LiquidGlassLayer: opacity changed $_opacity -> $value');
+    _opacity = value;
     markNeedsPaint();
   }
 
@@ -476,6 +504,13 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     _collectShapes(_reusableShapeList);
     final List<_ActiveShape> shapes = _reusableShapeList;
 
+    if (_opacity <= 0.0) {
+      // Fully transparent — don't paint anything.
+      _lastShapes = null;
+      _backdropHandle.layer = null;
+      return;
+    }
+
     if (_settings.thickness <= 0.0 || shapes.isEmpty) {
       _lastShapes = null;
       _backdropHandle.layer = null;
@@ -517,6 +552,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     );
 
     _uploadKeyColorUniform();
+    _uploadOpacityUniform();
 
     try {
       _shader.setImageSampler(1, _imageHolder.image ?? _emptySamplerImage);
@@ -525,7 +561,15 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     }
 
     // Paint Pass 1: Shapes that contain their own children within the glass
-    _paintShapeContents(context, offset, shapes, glassContainsChild: true);
+    final int alpha = (_opacity * 255).round().clamp(0, 255);
+    if (_opacity < 1.0) {
+      context.pushOpacity(offset, alpha,
+          (PaintingContext opCtx, Offset opOff) {
+        _paintShapeContents(opCtx, opOff, shapes, glassContainsChild: true);
+      });
+    } else {
+      _paintShapeContents(context, offset, shapes, glassContainsChild: true);
+    }
 
     ui.ImageFilter composedFilter;
     if (sigmaPx > 0.01 && nKernel > 0) {
@@ -563,8 +607,16 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     _backdropHandle.layer = backdropLayer;
 
     // Paint Pass 2: Shapes that overlay the glass effect
-    _paintShapeContents(context, offset, shapes, glassContainsChild: false);
-    super.paint(context, offset);
+    if (_opacity < 1.0) {
+      context.pushOpacity(offset, alpha,
+          (PaintingContext opCtx, Offset opOff) {
+        _paintShapeContents(opCtx, opOff, shapes, glassContainsChild: false);
+        super.paint(opCtx, opOff);
+      });
+    } else {
+      _paintShapeContents(context, offset, shapes, glassContainsChild: false);
+      super.paint(context, offset);
+    }
   }
 
   @override
@@ -830,6 +882,14 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       ..setFloat(_idxKeyColor + 2, target.blue / 255.0);
 
     _lastUploadedKeyColor = target;
+  }
+
+  void _uploadOpacityUniform() {
+    if (_lastUploadedOpacity == _opacity) return;
+    final double clamped = _opacity.clamp(0.0, 1.0);
+    debugPrint('LiquidGlassLayer: uploading opacity uniform = $clamped');
+    _shader.setFloat(_idxOpacity, clamped);
+    _lastUploadedOpacity = _opacity;
   }
 
   void _uploadProjectionUniforms(
