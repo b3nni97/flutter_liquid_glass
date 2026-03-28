@@ -403,11 +403,6 @@ vec3 _adjustColorBalance(vec3 color, float saturation, float lightness) {
   return clamp(adjustedColor, 0.0, 1.0);
 }
 
-/// Computes the anti-aliased coverage value for the shape edge.
-float _computeCoverageAA(float sd) {
-  float w = fwidth(sd);
-  return smoothstep(-w, w, -sd);
-}
 
 /// Computes a hard light blend adapted for specific background color conditions.
 vec3 _blendHardLight(vec3 base, vec3 blend) {
@@ -855,8 +850,7 @@ vec4 renderLiquidGlass(
       lighting, lightness, saturation, backgroundColor.rgb
   );
 
-  float coverage = _computeCoverageAA(signedDistance);
-  float baseAlpha = foregroundAlpha * coverage;
+  float baseAlpha = foregroundAlpha;
 
   float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
   float rimAlpha = masks.band * edgeAlphaGain;

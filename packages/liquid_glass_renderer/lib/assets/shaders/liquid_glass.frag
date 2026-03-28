@@ -155,12 +155,11 @@ vec2 _correctUVForTarget(vec2 uv) {
 }
 
 /// Calculates the alpha value for the foreground shape based on SDF distance.
+/// Uses fwidth() for transformation-stable anti-aliasing.
 float _calculateForegroundAlpha(float distance) {
-    return smoothstep(
-        0.0,
-        float(AGSL_AA_WIDTH_PX),
-        clamp(-distance, 0.0, float(AGSL_AA_WIDTH_PX))
-    );
+    float w = fwidth(distance);
+    float aaWidth = max(w, 1e-4);
+    return smoothstep(aaWidth, -aaWidth, distance);
 }
 
 /// Computes the dynamic scaling factor applied to the background refraction.
