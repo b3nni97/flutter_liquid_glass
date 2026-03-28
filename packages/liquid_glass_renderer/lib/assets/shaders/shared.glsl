@@ -26,7 +26,7 @@
 #endif
 
 #ifndef AGSL_DISPERSION_SCALE
-#define AGSL_DISPERSION_SCALE 0.4
+#define AGSL_DISPERSION_SCALE 0.11
 #endif
 
 #ifndef LG_CA_NEW_GAIN
@@ -462,14 +462,15 @@ vec3 _resolveDispersion(
   float heightScreen = sizeSdf.y / scaleY;
   float minDimensionScreen = min(widthScreen, heightScreen);
 
-  vec2 distUV = uvBase - centerUV;
+  vec2 distPx = (uvBase - centerUV) * sizePixels;
+  float invMinDim = 1.0 / max(minDimensionScreen, 1.0);
+  vec2 distNorm = distPx * invMinDim;
+  vec2 distCubed = distNorm * distNorm * distNorm;
   float dispersion = aberrationStrength * AGSL_DISPERSION_SCALE;
-  vec2 minDimOverSize = vec2(minDimensionScreen / sizePixels.x, minDimensionScreen / sizePixels.y);
-  vec2 distCubed = distUV * distUV * distUV;
 
   float distortMagnitude = length(refractionDisplacement);
   float boost = 1.0 + (distortMagnitude * 60.0);
-  vec2 aberrationUV = (dispersion * distCubed * minDimOverSize) * boost;
+  vec2 aberrationUV = (dispersion * distCubed * (minDimensionScreen / sizePixels)) * boost;
 
   vec2 halfPx = (1.0 / sizePixels) * 0.5;
   vec2 uvRed = uvBase - aberrationUV + halfPx;
