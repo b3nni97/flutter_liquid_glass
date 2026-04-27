@@ -91,6 +91,16 @@ uniform vec3 uKeyColor;
 /// The global opacity applied to the glass effect (0.0 to 1.0).
 uniform float uOpacity;
 
+/// Child-specific optical properties.
+/// x: Child Thickness
+/// y: Child Refractive Index
+/// z: Child Normal Plateau Width
+/// w: Child Normal Softness
+uniform vec4 uChildOpticalProps;
+
+/// Multiplier for child CA spread. 1.0 = same as background, <1 = less spread, >1 = more.
+uniform float uChildCaSpread;
+
 /// The background scene texture.
 uniform sampler2D uBackgroundTexture;
 
@@ -118,6 +128,57 @@ out vec4 fragColor;
 
 #define uNormalPlateauWidth   uNormalParams.x
 #define uNormalSoftness       uNormalParams.y
+
+#define uChildThickness       uChildOpticalProps.x
+#define uChildRefractiveIndex uChildOpticalProps.y
+#define uChildPlateauWidth    uChildOpticalProps.z
+#define uChildSoftness        uChildOpticalProps.w
+
+// CA / Dispersion constants
+#define uDispersionSaturation  1.0
+#define uDispersionLift        0.1
+#define uDispersionMinRange    0.01
+#define uDispersionMaxRange    1.0
+#define uCurvatureBoostP1      3.0
+#define uCurvatureBoostNegP1   8.0
+#define uCurvatureBoostP2      12.0
+#define uCurvatureBoostNegP2   20.0
+#define uP2CornernessMin       0.2
+#define uMaskCornerPx          12.0
+#define uMaskFlatPx            20.0
+#define uMaskTransitionPx      3.0
+#define uPass2Opacity          0.8
+#define rimEdgeDispersionMin   3.0
+#define rimCABrightness        0.75
+#define rimCASaturation        0.85
+#define rimCAGreenBias         0.5
+#define rimCABrightnessDark    0.25
+#define rimCASaturationDark    3.0
+#define rimCAGreenBiasDark     0.5
+#define rimCAMinBrightness     0.5
+#define rimCAMaxBrightness     1.0
+#define rimCAMinSaturation     0.4
+#define rimCAMaxSaturation     1.0
+#define uBiasFlipBlend         0.3
+#define uBiasFlipAngle         1.8
+#define uBiasFlipAngleV        -0.5
+#define uBiasProbeDepth        0.0
+#define uBiasThreshLow         0.31
+#define uBiasThreshHigh        0.40
+#define uBiasDarkThreshLow     0.4
+#define uBiasDarkThreshHigh    0.8
+#define uBiasVisLow            0.1
+#define uBiasVisHigh           0.5
+#define uCAOpacity             0.6
+#define uDispersionClamp       8.0
+#define uDispersionFloor       0.2
+#define uDispersionInset       -20.0
+// Flip angles for Pass 1
+#define uDispersionFlipAngle   -1.1
+#define uDispersionFlipAngleV  0.04
+// Flip angles for Pass 2
+#define uDispersionFlipAngleP2   -1.1
+#define uDispersionFlipAngleVP2  0.04
 
 #include "shared.glsl"
 #include "lg_union_sdf.glsl"
@@ -205,6 +266,7 @@ void main() {
 
     vec2 gradient = _calculateSdfGradient(sdUnion);
     vec3 normal = _calculateSurfaceNormal(sdUnion, gradient, uThickness, uNormalPlateauWidth, uNormalSoftness);
+    vec3 childNormal = _calculateSurfaceNormal(sdUnion, gradient, uChildThickness, uChildPlateauWidth, uChildSoftness);
 
     fragColor = renderLiquidGlass(
         scaledUV, 
@@ -229,6 +291,9 @@ void main() {
         rimWidthPx,
         rimSharpness,
         shapeIndex,
-        uOpacity
+        uOpacity,
+        uChildThickness,
+        uChildRefractiveIndex,
+        childNormal
     );
 }

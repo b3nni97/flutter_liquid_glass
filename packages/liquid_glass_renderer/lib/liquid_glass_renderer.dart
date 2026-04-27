@@ -11,5 +11,6 @@ export 'src/liquid_glass_layer.dart' show LiquidGlassLayer, TouchPoint;
 export 'src/liquid_glass_opacity.dart'
     show GlassOpacityScope, LiquidGlassAnimatedOpacity, LiquidGlassOpacity;
 export 'src/liquid_glass_renderer.dart';
-export 'src/liquid_glass_settings.dart' show GlowStyle, LiquidGlassSettings;
+export 'src/liquid_glass_settings.dart'
+    show ChildRefractionStyle, GlowStyle, LiquidGlassSettings;
 export 'src/liquid_shape.dart';

@@ -370,6 +370,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   static const int _idxChildSize = 354;
   static const int _idxKeyColor = 356;
   static const int _idxOpacity = 359;
+  static const int _idxChildOpticalProps = 360;
+  static const int _idxChildCaSpread = 364;
   static const int _blurIdxOpticalProps = 2;
   static const int _blurIdxColorAdjust = 6;
   static const int _blurIdxShapeData = 8;
@@ -524,8 +526,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     final double sigmaPx = _settings.blur * _devicePixelRatio;
 
     final List<_PackedSample> kernel = _getKernelAndMark(sigmaPx);
-    final int nKernel =
-        math.min(_GaussianKernelGenerator.maxKernelSize, kernel.length);
+    final int nKernel = sigmaPx > 0.01
+        ? math.min(_GaussianKernelGenerator.maxKernelSize, kernel.length)
+        : 0;
 
     _combineTouches(shapes, _reusableTouchList, globalToLocal);
     final List<_OwnedTouch> ownedTouches = _reusableTouchList;
@@ -958,7 +961,21 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       ..setFloat(_idxBgScale + 0, _settings.backgroundScale.dx)
       ..setFloat(_idxBgScale + 1, _settings.backgroundScale.dy)
       ..setFloat(_idxNormalParams + 0, _settings.normalPlateauWidth)
-      ..setFloat(_idxNormalParams + 1, _settings.normalSoftness);
+      ..setFloat(_idxNormalParams + 1, _settings.normalSoftness)
+      ..setFloat(
+          _idxChildOpticalProps + 0,
+          _settings.childRefraction?.thickness ?? thickness)
+      ..setFloat(
+          _idxChildOpticalProps + 1,
+          _settings.childRefraction?.refractiveIndex ?? _settings.refractiveIndex)
+      ..setFloat(
+          _idxChildOpticalProps + 2,
+          _settings.childRefraction?.normalPlateauWidth ?? _settings.normalPlateauWidth)
+      ..setFloat(
+          _idxChildOpticalProps + 3,
+          _settings.childRefraction?.normalSoftness ?? _settings.normalSoftness)
+      ..setFloat(_idxChildCaSpread,
+          _settings.childRefraction?.caSpread ?? 1.0);
 
     // 2. Upload BLUR Shader (Compact Set)
     // Only essential data for SDF

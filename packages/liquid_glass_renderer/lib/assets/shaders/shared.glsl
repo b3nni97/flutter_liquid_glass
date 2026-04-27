@@ -9,28 +9,8 @@
 #define LG_CA_VIS_THRESHOLD 1e-3
 #endif
 
-#ifndef LG_CA_OPACITY
-#define LG_CA_OPACITY 0.15
-#endif
-
-#ifndef LG_CA_LIGHTNESS_BOOST
-#define LG_CA_LIGHTNESS_BOOST 2.0
-#endif
-
-#ifndef LG_CA_SATURATION_BOOST
-#define LG_CA_SATURATION_BOOST 1.5
-#endif
-
 #ifndef LG_EPS
 #define LG_EPS 1e-8
-#endif
-
-#ifndef AGSL_DISPERSION_SCALE
-#define AGSL_DISPERSION_SCALE 0.11
-#endif
-
-#ifndef LG_CA_NEW_GAIN
-#define LG_CA_NEW_GAIN 1.0
 #endif
 
 #ifndef LG_REFRACT_AA_RADIUS_PX
@@ -54,7 +34,7 @@
 #endif
 
 #ifndef LG_CA_EDGE_FEATHER_PX
-#define LG_CA_EDGE_FEATHER_PX 1.5
+#define LG_CA_EDGE_FEATHER_PX 1.0
 #endif
 
 #ifndef GLOW_OWNER_FEATHER_PX
@@ -200,7 +180,27 @@ vec4 _applyGaussianBlur(sampler2D tex, vec2 baseUV) {
   vec2 maxUV = vec2(1.0) - eps;
 
   if (sampleCountRaw <= 0.5) {
-    return texture(tex, clamp(baseUV, minUV, maxUV));
+    vec2 cuv = clamp(baseUV, minUV, maxUV);
+
+    // When background scaling is active, use manual bilinear interpolation
+    // to guarantee correct sub-texel sampling regardless of hardware sampler
+    // filter mode.  This produces sharp (not blurry) anti-aliased edges.
+    // Cost: +3 extra texture reads when scaling is active.
+    float scaleDelta = abs(uBgScale.x - 1.0) + abs(uBgScale.y - 1.0);
+    if (scaleDelta > 0.001) {
+      vec2 texelCoord = cuv * uSize - 0.5;
+      vec2 f = fract(texelCoord);
+      vec2 base = (floor(texelCoord) + 0.5) / uSize;
+
+      vec4 tl = texture(tex, clamp(base,                     minUV, maxUV));
+      vec4 tr = texture(tex, clamp(base + vec2(pixel.x, 0.0), minUV, maxUV));
+      vec4 bl = texture(tex, clamp(base + vec2(0.0, pixel.y), minUV, maxUV));
+      vec4 br = texture(tex, clamp(base + pixel,              minUV, maxUV));
+
+      return mix(mix(tl, tr, f.x), mix(bl, br, f.x), f.y);
+    }
+
+    return texture(tex, cuv);
   }
 
   vec4 sum = vec4(0.0);
@@ -430,22 +430,61 @@ vec3 _blendHardLight(vec3 base, vec3 blend) {
   return mix(t1, t2, selection);
 }
 
-/// Resolves chromatic aberration and dispersion effects by separating color channels.
-vec3 _resolveDispersion(
-    vec2 uvBase,
-    vec2 childUVBase,
+/// Determines if the current pixel belongs to an icon or a background based on color keying.
+float _calculateIconMask(vec3 childRGB, vec3 keyColor) {
+  vec3 diffVec = abs(childRGB - keyColor);
+  float diff = max(diffVec.r, max(diffVec.g, diffVec.b));
+  return 1.0 - smoothstep(0.01, 0.04, diff);
+}
+
+/// Composites child texture onto a background sample using hard-light blending.
+vec3 _compositeChildOnBg(
+    vec4 bgSample,
+    sampler2D childTexture,
+    vec2 childUV,
+    vec3 keyColor,
+    vec4 glassColor,
+    float saturation,
+    float lightness
+) {
+  bgSample = _blendGlassTint(bgSample, glassColor);
+  bgSample.rgb = _adjustColorBalance(bgSample.rgb, saturation, lightness);
+
+  vec4 childSample = _sampleTexture(childTexture, childUV);
+  if (childSample.a <= 0.001) {
+    return bgSample.rgb;
+  }
+  vec3 childRGB = childSample.rgb / max(childSample.a, 1e-4);
+  float isIcon = _calculateIconMask(childRGB, keyColor);
+  vec3 blended = _blendHardLight(bgSample.rgb, childRGB);
+  vec3 final_ = mix(childRGB, blended, isIcon);
+  return mix(bgSample.rgb, final_, childSample.a);
+}
+
+/// Resolves chromatic aberration using Android-style 7-band spectral dispersion.
+/// Returns the final composited color (direct replacement, not a diff).
+vec4 _resolveDispersion(
+    vec2 refractedUV,
+    vec2 childUVRefracted,
     vec2 refractionDisplacement,
     vec2 sizePixels,
     sampler2D backgroundTexture,
     sampler2D childTexture,
     int shapeIndex,
     float aberrationStrength,
-    vec4 baseColor,
+    vec3 keyColor,
     float saturation,
     float lightness,
     vec4 glassColor,
-    float isIcon
+    float signedDistance,
+    vec3 normal,
+    float thickness,
+    float refractiveIndex
 ) {
+  // Scale factor to convert screen UV offsets to child UV space, with spread control
+  vec2 childCaScale = (sizePixels / max(uChildSize, vec2(1.0))) * uChildCaSpread;
+
+  // --- Compute shape center and half-size in UV space ---
   float type, radius;
   vec2 centerSdf, sizeSdf;
   _readShapeData(shapeIndex, type, centerSdf, sizeSdf, radius);
@@ -458,71 +497,295 @@ vec3 _resolveDispersion(
   float scaleX = max(length(col0), 1e-6);
   float scaleY = max(length(col1), 1e-6);
 
-  float widthScreen = sizeSdf.x / scaleX;
-  float heightScreen = sizeSdf.y / scaleY;
-  float minDimensionScreen = min(widthScreen, heightScreen);
+  vec2 halfSizeUV = (sizeSdf / vec2(scaleX, scaleY)) * 0.5 / sizePixels;
 
-  vec2 distPx = (uvBase - centerUV) * sizePixels;
-  float invMinDim = 1.0 / max(minDimensionScreen, 1.0);
-  vec2 distNorm = distPx * invMinDim;
-  vec2 distCubed = distNorm * distNorm * distNorm;
-  float dispersion = aberrationStrength * AGSL_DISPERSION_SCALE;
+  vec2 centeredUV = refractedUV - centerUV;
+  vec2 p = centeredUV / max(halfSizeUV, vec2(1e-6)); // normalized [-1,1]
+  vec2 absp = abs(p);
 
-  float distortMagnitude = length(refractionDisplacement);
-  float boost = 1.0 + (distortMagnitude * 60.0);
-  vec2 aberrationUV = (dispersion * distCubed * (minDimensionScreen / sizePixels)) * boost;
+  // Corner proximity using polar angle — allows sliding the boost around the arc
+  // sin(2θ) peaks at 45° (diagonal), equivalent to 2·px·py/r² · r²
+  float theta = atan(absp.y, max(absp.x, 1e-6)); // 0 to π/2
+  float r2 = absp.x * absp.x + absp.y * absp.y;
 
-  vec2 halfPx = (1.0 / sizePixels) * 0.5;
-  vec2 uvRed = uvBase - aberrationUV + halfPx;
-  vec2 uvBlue = uvBase + aberrationUV + halfPx;
+  // Convert pixel inset to angular shift along the corner arc
+  float halfMinPx = min(halfSizeUV.x * sizePixels.x, halfSizeUV.y * sizePixels.y);
+  float angularShift = uDispersionInset / max(halfMinPx, 1.0) * 1.5708; // π/2
 
-  vec4 sampleRedBg = _sampleTexture(backgroundTexture, uvRed);
-  vec4 sampleBlueBg = _sampleTexture(backgroundTexture, uvBlue);
+  // Rotate the boost peak: starts later horizontally, extends further vertically
+  float shifted = max(sin(2.0 * (theta - angularShift)), 0.0);
+  float cornerness = clamp(shifted * r2 * 0.5, 0.0, 1.0);
+  // Pass 1 curvature factors
+  float curvatureFactor = 1.0 + cornerness * uCurvatureBoostP1;
+  float curvatureFactorNeg = 1.0 + cornerness * uCurvatureBoostNegP1;
+  // Pass 2 curvature factors — remapped cornerness with raised threshold
+  // cornernessP2 stays 0 until cornerness exceeds uP2CornernessMin, then ramps to 1
+  float cornernessP2 = smoothstep(uP2CornernessMin, 1.0, cornerness);
+  float curvatureFactorP2 = 1.0 + cornernessP2 * uCurvatureBoostP2;
+  float curvatureFactorNegP2 = 1.0 + cornernessP2 * uCurvatureBoostNegP2;
 
-  vec4 sampleRedChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement - aberrationUV);
-  vec4 sampleBlueChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement + aberrationUV);
-  vec4 sampleGreenChild = _sampleTexture(childTexture, childUVBase + refractionDisplacement);
+  // Android original: dispersion along refraction direction, x*y intensity
+  vec2 shearedUV = vec2(
+      centeredUV.x - centeredUV.y * uDispersionFlipAngle,
+      centeredUV.y - centeredUV.x * uDispersionFlipAngleV
+  );
+  float rawProduct = (shearedUV.x * shearedUV.y) / max(halfSizeUV.x * halfSizeUV.y, 1e-8);
 
-  sampleRedBg = _blendGlassTint(sampleRedBg, glassColor);
-  sampleRedBg.rgb = _adjustColorBalance(sampleRedBg.rgb, saturation, lightness);
+  // Separate sheared UV for Pass 2 (inner CA) with independent flip angles
+  vec2 shearedUVP2 = vec2(
+      centeredUV.x - centeredUV.y * uDispersionFlipAngleP2,
+      centeredUV.y - centeredUV.x * uDispersionFlipAngleVP2
+  );
+  float rawProductP2 = (shearedUVP2.x * shearedUVP2.y) / max(halfSizeUV.x * halfSizeUV.y, 1e-8);
 
-  sampleBlueBg = _blendGlassTint(sampleBlueBg, glassColor);
-  sampleBlueBg.rgb = _adjustColorBalance(sampleBlueBg.rgb, saturation, lightness);
+  // flipT: smooth 0→1 — 0=negative quadrant, 1=positive quadrant
+  // --- Pass 1: Edge CA mask (curvature-adaptive depth) ---
+  float flipZone = 0.08;
+  float flipT = smoothstep(-flipZone, flipZone, rawProduct);
+  // Mask depth: flat vs corner, from uniform
+  float maskDepthPx = mix(uMaskFlatPx, uMaskCornerPx, cornerness);
+  // Convert to SDF units using gradient magnitude
+  float gradMag = max(length(vec2(dFdx(signedDistance), dFdy(signedDistance))), 1e-6);
+  float maskDepthSdf = maskDepthPx * gradMag;
+  // Mask transition in SDF units
+  float transW = uMaskTransitionPx * gradMag;
+  float edgeMask = smoothstep(-maskDepthSdf - transW, -maskDepthSdf, signedDistance);
 
-  if (sampleRedChild.a <= 0.001) sampleRedChild = sampleGreenChild;
-  if (sampleBlueChild.a <= 0.001) sampleBlueChild = sampleGreenChild;
+  float innerMask = 1.0 - edgeMask; // Pass 2: starts where edge zone ends
 
-  vec3 colorRed = (sampleRedChild.a > 0.001) ? sampleRedChild.rgb / sampleRedChild.a : sampleRedChild.rgb;
-  vec3 colorBlue = (sampleBlueChild.a > 0.001) ? sampleBlueChild.rgb / sampleBlueChild.a : sampleBlueChild.rgb;
+  // === PASS 1: Edge CA (no mask, uses refractionDisplacement) ===
+  // Positive quadrant dispersion (uses uCurvatureBoost)
+  float dispersionIntensity = aberrationStrength * abs(rawProduct);
+  dispersionIntensity *= curvatureFactor;
+  dispersionIntensity = max(dispersionIntensity, aberrationStrength * uDispersionFloor);
+  vec2 dispersedUV = refractionDisplacement * dispersionIntensity;
+  float disperseLen = length(dispersedUV * sizePixels);
+  if (disperseLen > 0.001) {
+    float softLen = tanh(disperseLen / uDispersionClamp) * uDispersionClamp;
+    dispersedUV *= softLen / disperseLen;
+  }
 
-  vec3 hardLightRed = _blendHardLight(sampleRedBg.rgb, colorRed);
-  vec3 targetRed = mix(colorRed, hardLightRed, isIcon);
-  float redComponent = mix(sampleRedBg.r, targetRed.r, sampleRedChild.a);
+  // Negative quadrant dispersion (uses uCurvatureBoostNeg)
+  float dispIntNeg = aberrationStrength * abs(rawProduct);
+  dispIntNeg *= curvatureFactorNeg;
+  dispIntNeg = max(dispIntNeg, aberrationStrength * uDispersionFloor);
+  vec2 dispersedUVNeg = refractionDisplacement * dispIntNeg;
+  float dLenNeg = length(dispersedUVNeg * sizePixels);
+  if (dLenNeg > 0.001) {
+    float softLenNeg = tanh(dLenNeg / uDispersionClamp) * uDispersionClamp;
+    dispersedUVNeg *= softLenNeg / dLenNeg;
+  }
 
-  vec3 hardLightBlue = _blendHardLight(sampleBlueBg.rgb, colorBlue);
-  vec3 targetBlue = mix(colorBlue, hardLightBlue, isIcon);
-  float blueComponent = mix(sampleBlueBg.b, targetBlue.b, sampleBlueChild.a);
+  // --- Edge dispersion minimum: ensure CA in the narrow rim strip ---
+  // rimEdgeDispersionMin is a minimum dispersion *intensity factor* in the rim zone.
+  // It multiplies refractionDisplacement (which is strong at the edge), so small
+  // values like 0.5 already produce visible color fringing.
+  float rimGradMag = max(length(vec2(dFdx(signedDistance), dFdy(signedDistance))), 1e-6);
+  float rimDepthSdf = rimWidthPx * rimGradMag;
+  float rimZone = smoothstep(-rimDepthSdf, 0.0, signedDistance);
+  if (rimZone > 0.001 && rimEdgeDispersionMin > 0.001) {
+    float edgeMinIntensity = rimEdgeDispersionMin * rimZone;
+    // Use refraction direction (normalized), falling back to surface normal at the edge
+    // where refractionDisplacement is near zero.
+    float refLen = length(refractionDisplacement);
+    vec2 refDir = refLen > 1e-6
+        ? refractionDisplacement / refLen
+        : (length(normal.xy) > 1e-6 ? normalize(normal.xy) : vec2(1.0, 0.0));
+    // Convert edgeMinIntensity from pixel units to UV offset
+    vec2 minOffsetUV = refDir * edgeMinIntensity / sizePixels;
+    // Boost positive dispersion
+    if (length(dispersedUV) < length(minOffsetUV)) {
+      dispersedUV = minOffsetUV;
+    }
+    // Boost negative dispersion
+    if (length(dispersedUVNeg) < length(minOffsetUV)) {
+      dispersedUVNeg = minOffsetUV;
+    }
+    // Limit how far outside the shape (past sd=0) samples can go: max 16px overshoot.
+    // Inward direction is unrestricted.
+    float edgeDistPx = max(-signedDistance / rimGradMag, 0.0);
+    float maxOutwardPx = edgeDistPx + 16.0;
+    float posPx = length(dispersedUV * sizePixels);
+    if (posPx > maxOutwardPx) {
+      dispersedUV *= maxOutwardPx / posPx;
+    }
+    float negPx = length(dispersedUVNeg * sizePixels);
+    if (negPx > maxOutwardPx) {
+      dispersedUVNeg *= maxOutwardPx / negPx;
+    }
+  }
 
-  float greenComponent = baseColor.g;
 
-  vec3 spectralNew = vec3(redComponent, greenComponent, blueComponent);
-  vec3 diff = spectralNew - baseColor.rgb;
+  // === PASS 2: Inner CA (stretched SDF, inverted colors, masked) ===
+  // Recompute normal with stretched SDF so tilt persists 30% deeper
+  float caSD = signedDistance * 0.77;
+  float caFullRange = thickness + uNormalPlateauWidth;
+  float caT = max(caFullRange + caSD, 0.0) / max(caFullRange, 1e-6);
+  float caCos = pow(caT, uNormalSoftness);
+  float caSin = sqrt(max(0.0, 1.0 - caCos * caCos));
+  vec2 nxyDir = length(normal.xy) > 1e-6 ? normalize(normal.xy) : vec2(0.0);
+  vec3 caNormal = normalize(vec3(nxyDir * caCos, caSin));
+  float caHeight = _calculateLiquidHeight(caSD, thickness);
+  vec3 caIncident = vec3(0.0, 0.0, -1.0);
+  float caRI = max(refractiveIndex, 1.0001);
+  vec3 caRefractVec = refract(caIncident, caNormal, 1.0 / caRI);
+  float caRefractLen = (caHeight + thickness * 8.0) / max(0.001, abs(caRefractVec.z));
+  vec2 caDisplacement = (caRefractVec.xy * caRefractLen) / sizePixels;
+  // Min CA that fades to 0 where the stretched refraction naturally ends
+  float caLenPx = length(caDisplacement * sizePixels);
+  float minFade = smoothstep(0.0, 2.0, caLenPx); // 1.0 where stretched refract is strong, 0.0 where it ends
+  float effectiveMinPx = 4.0 * minFade;
+  if (caLenPx < effectiveMinPx && caLenPx > 0.01) {
+    caDisplacement *= effectiveMinPx / caLenPx;
+  }
 
-  vec3 channelWeights = vec3(1.0, 0.9, 1.3);
-  diff *= channelWeights;
+  // Pass 2 dispersion vectors
+  float dispIntP2 = aberrationStrength * abs(rawProductP2) * curvatureFactorP2;
+  dispIntP2 = max(dispIntP2, aberrationStrength * uDispersionFloor);
+  vec2 dispersedP2 = caDisplacement * dispIntP2;
+  float dLenP2 = length(dispersedP2 * sizePixels);
+  if (dLenP2 > 0.001) {
+    dispersedP2 *= tanh(dLenP2 / uDispersionClamp) * uDispersionClamp / dLenP2;
+  }
 
-  diff *= float(LG_CA_LIGHTNESS_BOOST) * float(LG_CA_NEW_GAIN);
 
-  float luminanceNew = dot(diff, vec3(0.299, 0.587, 0.114));
-  return mix(vec3(luminanceNew), diff, float(LG_CA_SATURATION_BOOST));
+
+  // --- PASS 1 sampling: POSITIVE direction ---
+  vec3 colorPos = vec3(0.0);
+  {
+    vec3 p0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUV*1.1),
+        childTexture, childUVRefracted + dispersedUV*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+    vec3 p1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUV*0.75),
+        childTexture, childUVRefracted + dispersedUV*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+    vec3 p2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUV*0.25),
+        childTexture, childUVRefracted + dispersedUV*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+    vec3 p4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUV*0.8),
+        childTexture, childUVRefracted - dispersedUV*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+    vec3 p5 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUV*1.1),
+        childTexture, childUVRefracted - dispersedUV*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+    colorPos.r = p0.r * 0.50 + p1.r * 0.50;
+    colorPos.g = p2.g;
+    colorPos.b = p4.b * 0.50 + p5.b * 0.50;
+  }
+
+  // --- PASS 1: resolve direction blend ---
+  vec3 pass1Color;
+  if (flipT > 0.999) {
+    pass1Color = colorPos;
+  } else if (flipT < 0.001) {
+    vec3 n0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUVNeg*1.1),
+        childTexture, childUVRefracted - dispersedUVNeg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+    vec3 n1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUVNeg*0.75),
+        childTexture, childUVRefracted - dispersedUVNeg*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+    vec3 n2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*0.25),
+        childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+    vec3 n4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*0.8),
+        childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+    vec3 n5 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*1.1),
+        childTexture, childUVRefracted + dispersedUVNeg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+    vec3 colorNeg = vec3(0.0);
+    colorNeg.r = n0.r * 0.50 + n1.r * 0.50;
+    colorNeg.g = n2.g;
+    colorNeg.b = n4.b * 0.50 + n5.b * 0.50;
+    pass1Color = colorNeg;
+  } else {
+    vec3 colorNeg = vec3(0.0);
+    {
+      vec3 n0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUVNeg*1.1),
+          childTexture, childUVRefracted - dispersedUVNeg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+      vec3 n1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUVNeg*0.75),
+          childTexture, childUVRefracted - dispersedUVNeg*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+      vec3 n2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*0.25),
+          childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+      vec3 n4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*0.8),
+          childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+      vec3 n5 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*1.1),
+          childTexture, childUVRefracted + dispersedUVNeg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+      colorNeg.r = n0.r * 0.50 + n1.r * 0.50;
+      colorNeg.g = n2.g;
+      colorNeg.b = n4.b * 0.50 + n5.b * 0.50;
+    }
+    pass1Color = mix(colorNeg, colorPos, flipT);
+  }
+
+  // --- PASS 2 sampling: 7 bands with stretched displacement, INVERTED R↔B, with FLIP ---
+  // Also compute a negative-direction Pass 2 dispersion vector
+  float dispIntP2Neg = aberrationStrength * abs(rawProductP2) * curvatureFactorNegP2;
+  dispIntP2Neg = max(dispIntP2Neg, aberrationStrength * uDispersionFloor);
+  vec2 dispersedP2Neg = caDisplacement * dispIntP2Neg;
+  float dLenP2Neg = length(dispersedP2Neg * sizePixels);
+  if (dLenP2Neg > 0.001) {
+    dispersedP2Neg *= tanh(dLenP2Neg / uDispersionClamp) * uDispersionClamp / dLenP2Neg;
+  }
+
+  vec3 pass2Color = pass1Color; // fallback
+  if (innerMask > 0.001) {
+    // Pass 2 POSITIVE direction (inverted R↔B, 5-tap)
+    vec3 p2Pos = vec3(0.0);
+    {
+      vec3 q0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2*1.1),
+          childTexture, childUVRefracted + dispersedP2*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+      vec3 q1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2*0.75),
+          childTexture, childUVRefracted + dispersedP2*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+      vec3 q2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2*0.25),
+          childTexture, childUVRefracted + dispersedP2*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+      vec3 q3 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2*0.8),
+          childTexture, childUVRefracted - dispersedP2*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+      vec3 q4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2*1.1),
+          childTexture, childUVRefracted - dispersedP2*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+      p2Pos.b = q0.b * 0.50 + q1.b * 0.50;
+      p2Pos.g = q2.g;
+      p2Pos.r = q3.r * 0.50 + q4.r * 0.50;
+    }
+
+    if (flipT > 0.999) {
+      pass2Color = p2Pos;
+    } else if (flipT < 0.001) {
+      // Pass 2 NEGATIVE direction (inverted R↔B, 5-tap)
+      vec3 q0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2Neg*1.1),
+          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+      vec3 q1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2Neg*0.75),
+          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+      vec3 q2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*0.25),
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+      vec3 q3 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*0.8),
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+      vec3 q4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*1.1),
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+      vec3 p2Neg = vec3(0.0);
+      p2Neg.b = q0.b * 0.50 + q1.b * 0.50;
+      p2Neg.g = q2.g;
+      p2Neg.r = q3.r * 0.50 + q4.r * 0.50;
+      pass2Color = p2Neg;
+    } else {
+      // Transition: compute negative and blend (5-tap)
+      vec3 q0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2Neg*1.1),
+          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+      vec3 q1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2Neg*0.75),
+          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+      vec3 q2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*0.25),
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+      vec3 q3 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*0.8),
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+      vec3 q4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*1.1),
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+      vec3 p2Neg = vec3(0.0);
+      p2Neg.b = q0.b * 0.50 + q1.b * 0.50;
+      p2Neg.g = q2.g;
+      p2Neg.r = q3.r * 0.50 + q4.r * 0.50;
+      pass2Color = mix(p2Neg, p2Pos, flipT);
+    }
+  }
+
+  // Pass 2 (inverted) is base layer; Pass 1 (original CA) overpaints via edgeMask
+  // edgeMask = 1 near edge → Pass 1 visible, edgeMask = 0 inside → Pass 2 visible
+  // Pass 2 smooths via its mask (innerMask → 3px transition), Pass 1 has NO mask
+  // Pass 2 at configurable opacity
+  vec3 finalColor = mix(pass2Color, pass1Color, edgeMask);
+  finalColor = mix(pass1Color, finalColor, uPass2Opacity);
+  return vec4(finalColor, 1.0);
 }
 
-/// Determines if the current pixel belongs to an icon or a background based on color keying.
-float _calculateIconMask(vec3 childRGB, vec3 keyColor) {
-  vec3 diffVec = abs(childRGB - keyColor);
-  float diff = max(diffVec.r, max(diffVec.g, diffVec.b));
-  return 1.0 - smoothstep(0.01, 0.04, diff);
-}
 
 /// Computes the base refraction layer including background blending and texture displacement.
 vec4 _calculateRefractionLayer(
@@ -534,6 +797,7 @@ vec4 _calculateRefractionLayer(
     vec3 keyColor,
     out vec2 outRefractionDisplacement,
     out vec4 outRawTexture,
+    vec2 childRefractionDisplacement,
     int shapeIndex,
     float saturation,
     float lightness,
@@ -550,7 +814,7 @@ vec4 _calculateRefractionLayer(
   outRefractionDisplacement = displacementPixels / sizePixels;
 
   vec2 uvBase = screenUV + outRefractionDisplacement;
-  vec2 uvChild = childUVBase + outRefractionDisplacement;
+  vec2 uvChild = childUVBase + childRefractionDisplacement;
 
   float stretch = length(fwidth(displacementPixels));
   float blurRadius = clamp(stretch * 0.45, 0.0, 6.0);
@@ -572,41 +836,207 @@ vec4 _calculateRefractionLayer(
   backgroundSample.rgb = mix(backgroundSample.rgb, finalBlend, childSample.a);
 
   float ca = max(chromaticAberration, 0.0);
+  float caIntensity = smoothstep(0.0, 1.0, ca); // smooth fade for CA on/off
 
-  if (ca <= 0.005) {
+  if (ca <= 0.001) {
     return vec4(clamp(backgroundSample.rgb, 0.0, 1.0), backgroundSample.a);
   }
 
-  vec2 dirRefUV = displacementPixels / sizePixels;
-
-  vec4 baseAA = _sampleRefractionAA(
-      backgroundTexture, uvBase, sizePixels, dirRefUV,
-      float(LG_REFRACT_AA_RADIUS_PX),
-      float(LG_REFRACT_AA_STRENGTH),
-      1.4
+  // Android-style 7-band spectral dispersion — direct color replacement
+  vec4 spectralColor = _resolveDispersion(
+      uvBase, uvChild, outRefractionDisplacement,
+      sizePixels,
+      backgroundTexture, childTexture, shapeIndex, ca,
+      keyColor, saturation, lightness, glassColor,
+      signedDistance, normal, thickness, refractiveIndex
   );
 
-  baseAA = _blendGlassTint(baseAA, glassColor);
-  baseAA.rgb = _adjustColorBalance(baseAA.rgb, saturation, lightness);
+  // Edge feather: fade CA to zero at the shape boundary to avoid edge artifacts.
+  // CA starts at ~(LG_CA_EDGE_FEATHER_PX + 1) pixels inside and reaches 0 at sd=-1px.
+  float caFw = fwidth(signedDistance);
+  float caFeatherSdf = float(LG_CA_EDGE_FEATHER_PX) * caFw;
+  float caPadSdf = 0.0; // CA fades to 0 at shape edge
+  float edgeAA = smoothstep(caPadSdf, caFeatherSdf + caPadSdf, -signedDistance);
 
-  vec3 glassAA = _blendHardLight(baseAA.rgb, childRGB);
-  vec3 finalAA = mix(childRGB, glassAA, isIcon);
+  // Boost the CA band colors (diff from background) + soft compressor
+  vec3 caDiff = spectralColor.rgb - backgroundSample.rgb;
+  float greenDom = 0.0; // disabled
+  // Blue band brightening: boost intensity where blue is dominant (no color shift)
+  float blueDom = smoothstep(0.0, 0.01, caDiff.b - max(caDiff.r, caDiff.g));
+  caDiff *= mix(1.0, 1.15, blueDom);
+  float hasCAThere = 0.0;
+  vec3 biasDiff = vec3(0.0);
 
-  backgroundSample = vec4(mix(baseAA.rgb, finalAA, childSample.a), baseAA.a);
+  // Soft compression: tanh compression + min range lift
+  {
+    float diffLen = length(caDiff);
+    float maxR = max(uDispersionMaxRange, 0.001);
+    float compressed = tanh(diffLen / maxR) * maxR;
+    float lifted = max(compressed, min(diffLen, uDispersionMinRange));
+    caDiff *= (diffLen > 0.001) ? (lifted / diffLen) : 0.0;
+  }
 
-  vec3 diffNew = _resolveDispersion(
-      uvBase, childUVBase, outRefractionDisplacement, sizePixels,
-      backgroundTexture, childTexture, shapeIndex, ca, backgroundSample,
-      saturation, lightness, glassColor, isIcon
-  );
+  // --- Rim CA boost: brighten and saturate CA bands in the rim zone ---
+  float rimGradCA = max(length(vec2(dFdx(signedDistance), dFdy(signedDistance))), 1e-6);
+  float rimDepthCA = rimWidthPx * rimGradCA;
+  float rimPadCA = 1.0 * rimGradCA;
+  float rimZoneCA = smoothstep(-rimDepthCA, -rimPadCA, signedDistance);
 
-  float caMixNew = clamp(float(LG_CA_OPACITY), 0.0, 1.0);
+  // Rim boost: noise gate
+  if (rimZoneCA > 0.001) {
+    float noiseThreshold = 0.008;
+    float noiseGate = smoothstep(0.0, noiseThreshold, length(caDiff));
+    caDiff *= noiseGate;
+  }
 
-  float edgeAA = smoothstep(-float(LG_CA_EDGE_FEATHER_PX) * fwidth(signedDistance), 0.0, -signedDistance);
-  caMixNew *= edgeAA;
+  // Green spectral bias
+  float rimZoneGreen = 0.0;
+  {
+    float rimDepthGreen = (rimWidthPx + 3.0) * rimGradCA;
+    float rimFadeExtra = 2.0 * rimGradCA;
+    rimZoneGreen = smoothstep(-rimDepthGreen - rimFadeExtra, -rimPadCA, signedDistance);
+    if (rimZoneGreen > 0.001 && rimCAGreenBias > 0.001) {
+      float greenOnly = max(rimZoneGreen - rimZoneCA, 0.0);
+      if (greenOnly > 0.001) {
+        float noiseThreshG = 0.008 * max(rimCABrightness, 1.0);
+        float noiseGateG = smoothstep(0.0, noiseThreshG, length(caDiff));
+        caDiff *= mix(1.0, noiseGateG, greenOnly);
+      }
+      float caStrength = length(caDiff);
+      float caDeficit = max(1.0 - caStrength * 20.0, 0.0);
 
-  vec3 finalRGB = clamp(backgroundSample.rgb + diffNew * caMixNew, 0.0, 1.0);
-  return vec4(finalRGB, backgroundSample.a);
+      float _bType, _bRadius;
+      vec2 _bCenterSdf, _bSizeSdf;
+      _readShapeData(shapeIndex, _bType, _bCenterSdf, _bSizeSdf, _bRadius);
+      vec2 _bCenterPx = _projectSdfToScreen(_bCenterSdf);
+      vec2 _bCenterUV = _uvFromPx(_bCenterPx, sizePixels);
+      vec2 _bCol0 = uTransform[0].xy;
+      vec2 _bCol1 = uTransform[1].xy;
+      float _bScaleX = max(length(_bCol0), 1e-6);
+      float _bScaleY = max(length(_bCol1), 1e-6);
+      vec2 _bHalfSizeUV = (_bSizeSdf / vec2(_bScaleX, _bScaleY)) * 0.5 / sizePixels;
+
+      vec2 cUV = uvBase - _bCenterUV;
+      vec2 sUV = vec2(
+        cUV.x - cUV.y * uBiasFlipAngle,
+        cUV.y - cUV.x * uBiasFlipAngleV
+      );
+      float rp = (sUV.x * sUV.y) / max(_bHalfSizeUV.x * _bHalfSizeUV.y, 1e-8);
+      float biasFlip = smoothstep(-uBiasFlipBlend, uBiasFlipBlend, rp);
+      float effectiveProbeDepth = max(uBiasProbeDepth, 6.0);
+      float probeSD = -effectiveProbeDepth * rimGradCA;
+      float probeHeight = _calculateLiquidHeight(probeSD, thickness);
+      float probeRefractLen = (probeHeight + baseHeight) / max(0.001, abs(refractVec.z));
+      vec2 probeRefrDisp = refractVec.xy * probeRefractLen / sizePixels;
+
+      float currentDepthPx = -signedDistance / max(rimGradCA, 1e-6);
+      float extraInwardPx = max(effectiveProbeDepth - currentDepthPx, 0.0);
+      vec2 sdfGrad = vec2(dFdx(signedDistance), dFdy(signedDistance));
+      vec2 probeInwardDir = -normalize(sdfGrad + vec2(1e-6));
+      vec2 probeScreenPos = screenUV + probeInwardDir * extraInwardPx / sizePixels;
+      vec2 probeUVBase = probeScreenPos + probeRefrDisp;
+
+      float probeRefrLen2D = length(probeRefrDisp);
+      vec2 probeDispDir;
+      if (probeRefrLen2D > 1e-6) {
+        probeDispDir = probeRefrDisp / probeRefrLen2D;
+      } else {
+        vec2 sdfGrad2 = vec2(dFdx(signedDistance), dFdy(signedDistance));
+        probeDispDir = normalize(sdfGrad2 + vec2(1e-6));
+      }
+      float probeDispMag = probeRefractLen * chromaticAberration * 0.5 / length(sizePixels);
+      vec2 probeDispersion = probeDispDir * probeDispMag;
+
+      vec3 probeBgRed  = texture(backgroundTexture, probeUVBase + probeDispersion).rgb;
+      vec3 probeBgBlue = texture(backgroundTexture, probeUVBase - probeDispersion).rgb;
+      float probeCASignal = length(probeBgRed - probeBgBlue);
+      hasCAThere = smoothstep(uBiasThreshLow, uBiasThreshHigh, probeCASignal);
+      float greenAmount = rimZoneCA * hasCAThere;
+      biasDiff.g += greenAmount * (biasFlip * 0.70 + (1.0 - biasFlip) * 0.30);
+      biasDiff.b += greenAmount * ((1.0 - biasFlip) * 0.70 + biasFlip * 0.07);
+      biasDiff.r -= greenAmount * (biasFlip * 0.30 + (1.0 - biasFlip) * 0.28);
+    }
+  }
+
+  // Dispersion saturation + lift
+  vec3 boostedSpectral = backgroundSample.rgb + caDiff * uDispersionSaturation;
+  boostedSpectral += abs(caDiff) * uDispersionLift;
+
+  // E: Soft min/max clamps
+  // Soft min/max brightness/saturation clamps
+  if (rimZoneCA > 0.001) {
+    float specLum = dot(boostedSpectral, vec3(0.299, 0.587, 0.114));
+    vec3 specChroma = boostedSpectral - vec3(specLum);
+    float specChromaLen = length(specChroma);
+    float minB = mix(0.0, rimCAMinBrightness, rimZoneCA) * hasCAThere;
+    float maxB = rimCAMaxBrightness;
+    float pullUp = smoothstep(minB, 0.0, specLum);
+    specLum = mix(specLum, minB, pullUp);
+    float kneeB = maxB * 0.8;
+    if (specLum > kneeB) {
+      float excess = specLum - kneeB;
+      float range = maxB - kneeB;
+      specLum = kneeB + range * tanh(excess / max(range, 0.001));
+    }
+    float minS = mix(0.0, rimCAMinSaturation, rimZoneCA) * hasCAThere;
+    float maxS = rimCAMaxSaturation;
+    float chromaPullUp = smoothstep(minS, 0.0, specChromaLen);
+    float softChroma = mix(specChromaLen, minS, chromaPullUp);
+    float kneeS = maxS * 0.8;
+    if (softChroma > kneeS) {
+      float excessS = softChroma - kneeS;
+      float rangeS = maxS - kneeS;
+      softChroma = kneeS + rangeS * tanh(excessS / max(rangeS, 0.001));
+    }
+    if (specChromaLen > 0.0001) {
+      specChroma *= softChroma / specChromaLen;
+    }
+    boostedSpectral = vec3(specLum) + specChroma;
+  }
+
+  // Blend between non-CA result and spectral result at edge
+  vec3 finalRGB = mix(backgroundSample.rgb, boostedSpectral, edgeAA * caIntensity * uCAOpacity);
+
+  // Apply spectral bias — blended between dark/lit based on light facing
+  float biasEdgeAA = smoothstep(0.0, 1.5 * rimGradCA, -signedDistance); // 0 at edge, full ~1.5px inside
+  vec2 biasNDir = length(normal.xy) > 1e-6 ? normalize(normal.xy) : vec2(0.0);
+  float biasFacingRaw = abs(dot(biasNDir, normalize(uLightDirection)));
+  float biasFacing = smoothstep(uBiasDarkThreshLow, uBiasDarkThreshHigh, biasFacingRaw);
+  float effectiveGreenBias = mix(rimCAGreenBiasDark, rimCAGreenBias, biasFacing);
+  // Blend parameters between lit and dark based on facing
+  float effectiveBright = mix(rimCABrightnessDark, rimCABrightness, biasFacing);
+  float effectiveSat = mix(rimCASaturationDark, rimCASaturation, biasFacing);
+  float biasOpacity = effectiveGreenBias * biasEdgeAA;
+  float biasVis = smoothstep(uBiasVisLow, uBiasVisHigh, hasCAThere);
+  biasOpacity *= biasVis;
+  // Apply brightness and saturation to bias
+  vec3 scaledBias = biasDiff * effectiveBright;
+  float biasLum = dot(scaledBias, vec3(0.299, 0.587, 0.114));
+  vec3 biasChroma = scaledBias - vec3(biasLum);
+  scaledBias = vec3(biasLum) + biasChroma * effectiveSat;
+  // Dark side hue shift: only on green-dominant side → warmer green, keep blue intact
+  float isGreenSide = step(abs(scaledBias.b), abs(scaledBias.g)); // 1 if G > B
+  float darkShift = isGreenSide * (1.0 - biasFacing); // only green side + dark
+  scaledBias.b *= mix(1.0, 0.1, darkShift);
+  scaledBias.r *= mix(1.0, 0.3, darkShift);
+  // Dark side blue: reduce oversaturation
+  float blueDarkShift = (1.0 - isGreenSide) * (1.0 - biasFacing);
+  float blLum = dot(scaledBias, vec3(0.299, 0.587, 0.114));
+  scaledBias = mix(scaledBias, vec3(blLum), blueDarkShift * 0.78);
+  // Soft Light blend: darken background before adding bias
+  float darkAmount = darkShift * rimZoneCA * biasVis;
+
+  vec3 biasColor = vec3(0.0, rimCABrightnessDark, rimCABrightnessDark * 0.3);
+  vec3 softDark = 2.0 * finalRGB * biasColor;
+  vec3 softLight = 1.0 - 2.0 * (1.0 - finalRGB) * (1.0 - biasColor);
+  vec3 softResult = mix(softDark, softLight, step(vec3(0.5), finalRGB));
+  finalRGB = mix(finalRGB, softResult, darkAmount);
+  // 2. Then add bias on top (stays vibrant)
+  finalRGB = mix(finalRGB, finalRGB + scaledBias, biasOpacity);
+
+
+
+  return vec4(clamp(finalRGB, 0.0, 1.0), backgroundSample.a);
 }
 
 /// Calculates the combined lighting effect including rim, ambient, and core highlight components.
@@ -811,7 +1241,10 @@ vec4 renderLiquidGlass(
     float rimWidthPixels,
     float rimSharp,
     int shapeIndex,
-    float opacity
+    float opacity,
+    float childThickness,
+    float childRefractiveIndex,
+    vec3 childNormal
 ) {
   vec4 backgroundColor = _sampleTexture(backgroundTexture, screenUV);
 
@@ -830,6 +1263,19 @@ vec4 renderLiquidGlass(
       masks, nXyNormalized
   );
 
+  // Compute child-specific refraction displacement
+  vec2 childRefractionDisplacement;
+  {
+    vec3 incident = vec3(0.0, 0.0, -1.0);
+    float nChild = max(childRefractiveIndex, 1.0001);
+    vec3 childRefractVec = refract(incident, childNormal, 1.0 / nChild);
+    float childHeight = _calculateLiquidHeight(signedDistance, childThickness);
+    float childBaseHeight = childThickness * 8.0;
+    float childRefractLength = (childHeight + childBaseHeight) / max(0.001, abs(childRefractVec.z));
+    vec2 childDispPx = childRefractVec.xy * childRefractLength;
+    childRefractionDisplacement = childDispPx / size;
+  }
+
   vec2 refractionDisplacement;
   vec4 rawRefractionTexture;
 
@@ -839,9 +1285,13 @@ vec4 renderLiquidGlass(
       size, backgroundTexture,
       childTexture, childUVBase, keyColor,
       refractionDisplacement, rawRefractionTexture,
+      childRefractionDisplacement,
       shapeIndex,
       saturation, lightness, glassColor
   );
+
+  // Rim lighting in CA zone — no reduction (bias handles its own shadow)
+  // (lighting unchanged)
 
   refractColorBase.rgb += lighting;
 

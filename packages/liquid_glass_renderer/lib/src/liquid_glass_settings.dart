@@ -132,6 +132,85 @@ class GlowStyle with EquatableMixin {
       ];
 }
 
+/// Defines child-specific refraction parameters for the liquid glass effect.
+///
+/// When set on [LiquidGlassSettings], these values override the global
+/// refraction for the child texture (icons, text). If a field is null,
+/// the corresponding global setting is used.
+class ChildRefractionStyle with EquatableMixin {
+  /// Creates a child refraction style.
+  const ChildRefractionStyle({
+    this.thickness,
+    this.refractiveIndex,
+    this.normalPlateauWidth,
+    this.normalSoftness,
+    this.caSpread,
+  });
+
+  /// Linear interpolation between two [ChildRefractionStyle]s.
+  static ChildRefractionStyle? lerp(
+      ChildRefractionStyle? a, ChildRefractionStyle? b, double t) {
+    if (a == null && b == null) return null;
+    a ??= const ChildRefractionStyle();
+    b ??= const ChildRefractionStyle();
+
+    return ChildRefractionStyle(
+      thickness: _lerpNullable(a.thickness, b.thickness, t),
+      refractiveIndex: _lerpNullable(a.refractiveIndex, b.refractiveIndex, t),
+      normalPlateauWidth:
+          _lerpNullable(a.normalPlateauWidth, b.normalPlateauWidth, t),
+      normalSoftness: _lerpNullable(a.normalSoftness, b.normalSoftness, t),
+      caSpread: _lerpNullable(a.caSpread, b.caSpread, t),
+    );
+  }
+
+  static double? _lerpNullable(double? a, double? b, double t) {
+    if (a == null && b == null) return null;
+    return lerpDouble(a ?? b!, b ?? a!, t);
+  }
+
+  /// The thickness for the child texture refraction. Overrides [LiquidGlassSettings.thickness].
+  final double? thickness;
+
+  /// The refractive index for the child texture. Overrides [LiquidGlassSettings.refractiveIndex].
+  final double? refractiveIndex;
+
+  /// The normal plateau width for the child texture. Overrides [LiquidGlassSettings.normalPlateauWidth].
+  final double? normalPlateauWidth;
+
+  /// The normal softness for the child texture. Overrides [LiquidGlassSettings.normalSoftness].
+  final double? normalSoftness;
+
+  /// Multiplier for child CA spread. 1.0 = same as background. <1 = less spread, >1 = more.
+  final double? caSpread;
+
+  /// Creates a copy with the given fields replaced.
+  ChildRefractionStyle copyWith({
+    double? thickness,
+    double? refractiveIndex,
+    double? normalPlateauWidth,
+    double? normalSoftness,
+    double? caSpread,
+  }) {
+    return ChildRefractionStyle(
+      thickness: thickness ?? this.thickness,
+      refractiveIndex: refractiveIndex ?? this.refractiveIndex,
+      normalPlateauWidth: normalPlateauWidth ?? this.normalPlateauWidth,
+      normalSoftness: normalSoftness ?? this.normalSoftness,
+      caSpread: caSpread ?? this.caSpread,
+    );
+  }
+
+  @override
+  List<Object?> get props => [
+        thickness,
+        refractiveIndex,
+        normalPlateauWidth,
+        normalSoftness,
+        caSpread
+      ];
+}
+
 /// Global settings configuration for the Liquid Glass effect.
 ///
 /// Controls the optical properties (refraction, blur, chromatic aberration),
@@ -156,6 +235,7 @@ class LiquidGlassSettings with EquatableMixin {
     this.backgroundScale = const Offset(1.0, 1.0),
     this.normalPlateauWidth = 24.0,
     this.normalSoftness = 1.8,
+    this.childRefraction,
   });
 
   /// Creates a liquid glass configuration using Figma-style parameters (0-100 scales).
@@ -224,6 +304,8 @@ class LiquidGlassSettings with EquatableMixin {
       normalPlateauWidth:
           lerpDouble(a.normalPlateauWidth, b.normalPlateauWidth, t)!,
       normalSoftness: lerpDouble(a.normalSoftness, b.normalSoftness, t)!,
+      childRefraction:
+          ChildRefractionStyle.lerp(a.childRefraction, b.childRefraction, t),
     );
   }
 
@@ -280,6 +362,13 @@ class LiquidGlassSettings with EquatableMixin {
   /// The softness exponent for the normal map curve.
   final double normalSoftness;
 
+  /// Optional child-specific refraction parameters.
+  ///
+  /// When non-null, the child texture (icons, text) uses these values
+  /// instead of the global [thickness], [refractiveIndex], [normalPlateauWidth],
+  /// and [normalSoftness]. Individual null fields fall back to the global value.
+  final ChildRefractionStyle? childRefraction;
+
   /// Creates a copy of these settings with the given fields replaced with the new values.
   LiquidGlassSettings copyWith({
     Color? glassColor,
@@ -299,6 +388,7 @@ class LiquidGlassSettings with EquatableMixin {
     Offset? backgroundScale,
     double? normalPlateauWidth,
     double? normalSoftness,
+    ChildRefractionStyle? childRefraction,
   }) {
     return LiquidGlassSettings(
       glassColor: glassColor ?? this.glassColor,
@@ -318,6 +408,7 @@ class LiquidGlassSettings with EquatableMixin {
       backgroundScale: backgroundScale ?? this.backgroundScale,
       normalPlateauWidth: normalPlateauWidth ?? this.normalPlateauWidth,
       normalSoftness: normalSoftness ?? this.normalSoftness,
+      childRefraction: childRefraction ?? this.childRefraction,
     );
   }
 
@@ -340,5 +431,6 @@ class LiquidGlassSettings with EquatableMixin {
         backgroundScale,
         normalPlateauWidth,
         normalSoftness,
+        childRefraction,
       ];
 }
