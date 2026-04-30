@@ -236,6 +236,7 @@ class LiquidGlassSettings with EquatableMixin {
     this.normalPlateauWidth = 24.0,
     this.normalSoftness = 1.8,
     this.childRefraction,
+    this.backgroundOverlay,
   });
 
   /// Creates a liquid glass configuration using Figma-style parameters (0-100 scales).
@@ -306,6 +307,8 @@ class LiquidGlassSettings with EquatableMixin {
       normalSoftness: lerpDouble(a.normalSoftness, b.normalSoftness, t)!,
       childRefraction:
           ChildRefractionStyle.lerp(a.childRefraction, b.childRefraction, t),
+      backgroundOverlay:
+          Color.lerp(a.backgroundOverlay, b.backgroundOverlay, t),
     );
   }
 
@@ -369,6 +372,14 @@ class LiquidGlassSettings with EquatableMixin {
   /// and [normalSoftness]. Individual null fields fall back to the global value.
   final ChildRefractionStyle? childRefraction;
 
+  /// A simple alpha-over color tint applied to the refracted background
+  /// before lighting calculations.
+  ///
+  /// Equivalent to painting a semi-transparent [Container] as a child overlay,
+  /// but applied directly in the shader to avoid blur-bleed artifacts.
+  /// When null or fully transparent, no overlay is applied.
+  final Color? backgroundOverlay;
+
   /// Creates a copy of these settings with the given fields replaced with the new values.
   LiquidGlassSettings copyWith({
     Color? glassColor,
@@ -389,6 +400,7 @@ class LiquidGlassSettings with EquatableMixin {
     double? normalPlateauWidth,
     double? normalSoftness,
     ChildRefractionStyle? childRefraction,
+    Color? backgroundOverlay,
   }) {
     return LiquidGlassSettings(
       glassColor: glassColor ?? this.glassColor,
@@ -409,6 +421,7 @@ class LiquidGlassSettings with EquatableMixin {
       normalPlateauWidth: normalPlateauWidth ?? this.normalPlateauWidth,
       normalSoftness: normalSoftness ?? this.normalSoftness,
       childRefraction: childRefraction ?? this.childRefraction,
+      backgroundOverlay: backgroundOverlay ?? this.backgroundOverlay,
     );
   }
 
@@ -432,5 +445,6 @@ class LiquidGlassSettings with EquatableMixin {
         normalPlateauWidth,
         normalSoftness,
         childRefraction,
+        backgroundOverlay,
       ];
 }

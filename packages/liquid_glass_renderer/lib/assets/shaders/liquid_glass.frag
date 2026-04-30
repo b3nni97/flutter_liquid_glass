@@ -101,6 +101,10 @@ uniform vec4 uChildOpticalProps;
 /// Multiplier for child CA spread. 1.0 = same as background, <1 = less spread, >1 = more.
 uniform float uChildCaSpread;
 
+/// A simple alpha-over tint applied to the background before glass processing.
+/// Equivalent to painting a semi-transparent color overlay on the background.
+uniform vec4 uBgOverlay;
+
 /// The background scene texture.
 uniform sampler2D uBackgroundTexture;
 
@@ -294,6 +298,7 @@ void main() {
         uOpacity,
         uChildThickness,
         uChildRefractiveIndex,
-        childNormal
+        childNormal,
+        uBgOverlay
     );
 }

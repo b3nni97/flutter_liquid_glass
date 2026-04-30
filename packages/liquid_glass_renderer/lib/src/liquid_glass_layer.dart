@@ -372,6 +372,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   static const int _idxOpacity = 359;
   static const int _idxChildOpticalProps = 360;
   static const int _idxChildCaSpread = 364;
+  static const int _idxBgOverlay = 365;
   static const int _blurIdxOpticalProps = 2;
   static const int _blurIdxColorAdjust = 6;
   static const int _blurIdxShapeData = 8;
@@ -975,7 +976,15 @@ class RenderLiquidGlassLayer extends RenderProxyBox
           _idxChildOpticalProps + 3,
           _settings.childRefraction?.normalSoftness ?? _settings.normalSoftness)
       ..setFloat(_idxChildCaSpread,
-          _settings.childRefraction?.caSpread ?? 1.0);
+          _settings.childRefraction?.caSpread ?? 1.0)
+      ..setFloat(_idxBgOverlay + 0,
+          (_settings.backgroundOverlay?.red ?? 0) / 255.0)
+      ..setFloat(_idxBgOverlay + 1,
+          (_settings.backgroundOverlay?.green ?? 0) / 255.0)
+      ..setFloat(_idxBgOverlay + 2,
+          (_settings.backgroundOverlay?.blue ?? 0) / 255.0)
+      ..setFloat(_idxBgOverlay + 3,
+          (_settings.backgroundOverlay?.alpha ?? 0) / 255.0);
 
     // 2. Upload BLUR Shader (Compact Set)
     // Only essential data for SDF

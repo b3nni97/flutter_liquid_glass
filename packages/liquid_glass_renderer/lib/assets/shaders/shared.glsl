@@ -801,7 +801,8 @@ vec4 _calculateRefractionLayer(
     int shapeIndex,
     float saturation,
     float lightness,
-    vec4 glassColor
+    vec4 glassColor,
+    vec4 bgOverlay
 ) {
   vec3 incident = vec3(0.0, 0.0, -1.0);
   float n = max(refractiveIndex, 1.0001);
@@ -821,6 +822,11 @@ vec4 _calculateRefractionLayer(
 
   vec4 backgroundSample = _applyGaussianBlur(backgroundTexture, uvBase);
   outRawTexture = backgroundSample;
+
+  // Apply background overlay before any tinting or color adjustment.
+  if (bgOverlay.a > 0.001) {
+    backgroundSample.rgb = mix(backgroundSample.rgb, bgOverlay.rgb, bgOverlay.a);
+  }
 
   backgroundSample = _blendGlassTint(backgroundSample, glassColor);
   backgroundSample.rgb = _adjustColorBalance(backgroundSample.rgb, saturation, lightness);
@@ -1244,9 +1250,15 @@ vec4 renderLiquidGlass(
     float opacity,
     float childThickness,
     float childRefractiveIndex,
-    vec3 childNormal
+    vec3 childNormal,
+    vec4 bgOverlay
 ) {
   vec4 backgroundColor = _sampleTexture(backgroundTexture, screenUV);
+
+  // Apply background overlay to the edge-blend background as well.
+  if (bgOverlay.a > 0.001) {
+    backgroundColor.rgb = mix(backgroundColor.rgb, bgOverlay.rgb, bgOverlay.a);
+  }
 
   if (foregroundAlpha < 0.001 || thickness < 0.01 || opacity < 0.001) {
     return backgroundColor;
@@ -1287,11 +1299,9 @@ vec4 renderLiquidGlass(
       refractionDisplacement, rawRefractionTexture,
       childRefractionDisplacement,
       shapeIndex,
-      saturation, lightness, glassColor
+      saturation, lightness, glassColor,
+      bgOverlay
   );
-
-  // Rim lighting in CA zone — no reduction (bias handles its own shadow)
-  // (lighting unchanged)
 
   refractColorBase.rgb += lighting;
 
