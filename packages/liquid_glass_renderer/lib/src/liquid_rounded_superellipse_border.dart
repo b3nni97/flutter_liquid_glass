@@ -105,43 +105,110 @@ class LiquidRoundedSuperellipseBorder extends OutlinedBorder {
     return 'LiquidRoundedSuperellipseBorder($side, $borderRadius, smoothing: $cornerSmoothing)';
   }
 
+  /// Number of angular samples for tracing the superellipse boundary.
+  /// 64 samples (≈5.6° apart) with cubic Bézier interpolation provide
+  /// sub-pixel accuracy for typical shape sizes.
+  static const int _kSamples = 64;
+
   /// Generates the path for the morphed shape.
   ///
-  /// Interpolates the radii of the [rrect] towards the maximum possible radii
-  /// (width/2, height/2) based on the [smoothing] factor.
+  /// Traces the zero contour of the mixed SDF that interpolates between a
+  /// rounded rectangle and a superellipse, exactly matching the shader's
+  /// `calculateSquircleSDF` function in `lg_union_sdf.glsl`.
   Path _computeMorphPath(RRect rrect, double smoothing) {
     final Rect rect = rrect.outerRect;
     final double t = smoothing.clamp(0.0, 1.0);
 
-    // Optimization: Return standard RRect for 0.0 smoothing.
     if (t <= 1e-3) {
       return Path()..addRRect(rrect);
     }
 
-    // Optimization: Return oval for 1.0 smoothing.
     if (t >= 1.0 - 1e-3) {
       return Path()..addOval(rect);
     }
 
-    final double maxRx = rect.width / 2.0;
-    final double maxRy = rect.height / 2.0;
+    final double halfW = rect.width / 2.0;
+    final double halfH = rect.height / 2.0;
+    final double cx = rect.center.dx;
+    final double cy = rect.center.dy;
+    final double shortSide = math.min(halfW, halfH);
+    final double r = math.max(rrect.tlRadiusX, 0.001);
+    final double n = (2.0 * shortSide / r).clamp(2.0, 40.0);
+    final double maxDist = math.sqrt(halfW * halfW + halfH * halfH);
 
-    // Helper to interpolate a specific radius towards the max dimensions.
-    Radius lerpToMax(double currentX, double currentY) {
-      return Radius.elliptical(
-        lerpDouble(currentX, maxRx, t)!,
-        lerpDouble(currentY, maxRy, t)!,
-      );
+    // Trace the zero contour via bisection along rays from the center.
+    final List<Offset> pts = List<Offset>.filled(_kSamples, Offset.zero);
+    for (int i = 0; i < _kSamples; i++) {
+      final double theta = (i / _kSamples) * 2.0 * math.pi;
+      final double dx = math.cos(theta);
+      final double dy = math.sin(theta);
+      double lo = 0.0, hi = maxDist;
+      for (int j = 0; j < 20; j++) {
+        final double mid = (lo + hi) * 0.5;
+        if (_mixedSDF(dx * mid, dy * mid, halfW, halfH, shortSide, r, n, t) <
+            0.0) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      final double d = (lo + hi) * 0.5;
+      pts[i] = Offset(cx + dx * d, cy + dy * d);
     }
 
-    final RRect interpolated = RRect.fromRectAndCorners(
-      rect,
-      topLeft: lerpToMax(rrect.tlRadiusX, rrect.tlRadiusY),
-      topRight: lerpToMax(rrect.trRadiusX, rrect.trRadiusY),
-      bottomLeft: lerpToMax(rrect.blRadiusX, rrect.blRadiusY),
-      bottomRight: lerpToMax(rrect.brRadiusX, rrect.brRadiusY),
-    );
+    // Build a smooth closed path via Catmull-Rom → cubic Bézier conversion.
+    final path = Path()..moveTo(pts[0].dx, pts[0].dy);
+    for (int i = 0; i < _kSamples; i++) {
+      final Offset p0 = pts[(i - 1 + _kSamples) % _kSamples];
+      final Offset p1 = pts[i];
+      final Offset p2 = pts[(i + 1) % _kSamples];
+      final Offset p3 = pts[(i + 2) % _kSamples];
+      path.cubicTo(
+        p1.dx + (p2.dx - p0.dx) / 6.0,
+        p1.dy + (p2.dy - p0.dy) / 6.0,
+        p2.dx - (p3.dx - p1.dx) / 6.0,
+        p2.dy - (p3.dy - p1.dy) / 6.0,
+        p2.dx,
+        p2.dy,
+      );
+    }
+    path.close();
+    return path;
+  }
 
-    return Path()..addRRect(interpolated);
+  /// The mixed SDF matching the shader's `calculateSquircleSDF`.
+  /// Returns `mix(roundedRectSDF, superellipseSDF, t)`.
+  static double _mixedSDF(
+    double px,
+    double py,
+    double halfW,
+    double halfH,
+    double shortSide,
+    double radius,
+    double n,
+    double t,
+  ) {
+    // Rounded rectangle SDF.
+    final double limit = math.min(halfW, halfH);
+    final double er = math.min(radius, limit);
+    final double qx = px.abs() - halfW + er;
+    final double qy = py.abs() - halfH + er;
+    final double rrSDF = math.min(math.max(qx, qy), 0.0) +
+        math.sqrt(
+          math.max(qx, 0.0) * math.max(qx, 0.0) +
+              math.max(qy, 0.0) * math.max(qy, 0.0),
+        ) -
+        er;
+
+    // Superellipse SDF.
+    final double nx = (px.abs() / halfW);
+    final double ny = (py.abs() / halfH);
+    final double raw = math.pow(
+      math.pow(nx, n).toDouble() + math.pow(ny, n).toDouble(),
+      1.0 / n,
+    ).toDouble();
+    final double seSDF = (raw - 1.0) * shortSide;
+
+    return rrSDF * (1.0 - t) + seSDF * t;
   }
 }
