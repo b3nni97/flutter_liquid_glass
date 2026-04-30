@@ -1255,11 +1255,6 @@ vec4 renderLiquidGlass(
 ) {
   vec4 backgroundColor = _sampleTexture(backgroundTexture, screenUV);
 
-  // Apply background overlay to the edge-blend background as well.
-  if (bgOverlay.a > 0.001) {
-    backgroundColor.rgb = mix(backgroundColor.rgb, bgOverlay.rgb, bgOverlay.a);
-  }
-
   if (foregroundAlpha < 0.001 || thickness < 0.01 || opacity < 0.001) {
     return backgroundColor;
   }
