@@ -38,7 +38,7 @@
 #endif
 
 #ifndef GLOW_OWNER_FEATHER_PX
-#define GLOW_OWNER_FEATHER_PX 1.6
+#define GLOW_OWNER_FEATHER_PX 4.0
 #endif
 
 #ifndef LG_RIM_TOP_HIGHLIGHT_STRENGTH
@@ -349,21 +349,21 @@ float _calculateLiquidHeight(float signedDistance, float thickness) {
 }
 
 /// Computes intensity masks for the rim lighting effect using gradient analysis.
-RimMasks _calculateRimMasks(float signedDistance, float rimWidthPixels, float rimSharp) {
+RimMasks _calculateRimMasks(float signedDistance, float rimWidthPixels) {
   vec2 gradient = vec2(dFdx(signedDistance), dFdy(signedDistance));
   float gradientMagnitude = max(length(gradient), 1e-6);
 
   float widthSdf = max(rimWidthPixels, 0.0) * gradientMagnitude;
-  float aaWidth = 1.5 * gradientMagnitude;
 
-  float safeSharpness = clamp(rimSharp, 0.0, 1.0);
-  float fadeLength = min(mix(widthSdf, aaWidth, safeSharpness), widthSdf);
+  // Inner fade: squared smoothstep centered at -widthSdf.
+  float innerFw = max(fwidth(signedDistance), 1e-6);
+  float band = smoothstep(-widthSdf - innerFw, -widthSdf + innerFw, signedDistance);
+  band *= band;
 
-  float startFade = -widthSdf;
-  float endFade = startFade + fadeLength;
-  float band = smoothstep(startFade, endFade, signedDistance);
-
-  float outerEdgeFade = 1.0 - smoothstep(-aaWidth, 0.0, signedDistance);
+  // Outer edge: rim at 0.25 at sd=0.
+  float outerFw = max(fwidth(signedDistance), 1e-6);
+  float outerEdgeFade = smoothstep(outerFw, -outerFw, signedDistance);
+  outerEdgeFade *= outerEdgeFade; // 0.25 at sd=0
   band *= outerEdgeFade;
 
   RimMasks masks;
@@ -811,13 +811,28 @@ vec4 _calculateRefractionLayer(
   float baseHeight = thickness * 8.0;
   float refractLength = (height + baseHeight) / max(0.001, abs(refractVec.z));
 
-  vec2 displacementPixels = refractVec.xy * refractLength;
-  outRefractionDisplacement = displacementPixels / sizePixels;
+  // Optical uses full displacement (edgeFade in compositing handles the visual blending).
+  vec2 opticalDisp = refractVec.xy * refractLength;
+
+  // CA fade: 1.5px range — gives spectral samples enough spread at the edge.
+  float refractFw = max(fwidth(signedDistance), 1e-6);
+  float caFade = smoothstep(0.0, -1.5 * refractFw, signedDistance); // sd=-0.5→0.26, sd=-1.5→1.0
+  float caLength = refractLength * caFade;
+  vec2 caDisp = refractVec.xy * caLength;
+
+  // No sub-pixel gate on optical — edgeFade handles the visual transition.
+  outRefractionDisplacement = opticalDisp / sizePixels;
+
+  // Kill sub-pixel refraction on CA path only.
+  float caDispMag = length(caDisp);
+  float caDispGate = smoothstep(0.0, 2.0, caDispMag);
+  caDisp *= caDispGate;
+  vec2 caRefractionDisplacement = caDisp / sizePixels;
 
   vec2 uvBase = screenUV + outRefractionDisplacement;
   vec2 uvChild = childUVBase + childRefractionDisplacement;
 
-  float stretch = length(fwidth(displacementPixels));
+  float stretch = length(fwidth(opticalDisp));
   float blurRadius = clamp(stretch * 0.45, 0.0, 6.0);
 
   vec4 backgroundSample = _applyGaussianBlur(backgroundTexture, uvBase);
@@ -848,21 +863,20 @@ vec4 _calculateRefractionLayer(
     return vec4(clamp(backgroundSample.rgb, 0.0, 1.0), backgroundSample.a);
   }
 
-  // Android-style 7-band spectral dispersion — direct color replacement
+  // Android-style 7-band spectral dispersion — uses CA displacement for more spread at edge.
+  vec2 caUvBase = screenUV + caRefractionDisplacement;
   vec4 spectralColor = _resolveDispersion(
-      uvBase, uvChild, outRefractionDisplacement,
+      caUvBase, uvChild, caRefractionDisplacement,
       sizePixels,
       backgroundTexture, childTexture, shapeIndex, ca,
       keyColor, saturation, lightness, glassColor,
       signedDistance, normal, thickness, refractiveIndex
   );
 
-  // Edge feather: fade CA to zero at the shape boundary to avoid edge artifacts.
-  // CA starts at ~(LG_CA_EDGE_FEATHER_PX + 1) pixels inside and reaches 0 at sd=-1px.
-  float caFw = fwidth(signedDistance);
-  float caFeatherSdf = float(LG_CA_EDGE_FEATHER_PX) * caFw;
-  float caPadSdf = 0.0; // CA fades to 0 at shape edge
-  float edgeAA = smoothstep(caPadSdf, caFeatherSdf + caPadSdf, -signedDistance);
+  // Edge feather: fade CA in with squared smoothstep.
+  // 0.0 at sd=0, 0.26 at sd=-0.5, 1.0 at sd=-1.5.
+  float caFw = max(fwidth(signedDistance), 1e-6);
+  float edgeAA = smoothstep(0.0, -1.5 * caFw, signedDistance);
 
   // Boost the CA band colors (diff from background) + soft compressor
   vec3 caDiff = spectralColor.rgb - backgroundSample.rgb;
@@ -895,12 +909,20 @@ vec4 _calculateRefractionLayer(
     caDiff *= noiseGate;
   }
 
-  // Green spectral bias
+  // Green spectral bias — band with smooth in/out fades
   float rimZoneGreen = 0.0;
   {
     float rimDepthGreen = (rimWidthPx + 3.0) * rimGradCA;
-    float rimFadeExtra = 2.0 * rimGradCA;
-    rimZoneGreen = smoothstep(-rimDepthGreen - rimFadeExtra, -rimPadCA, signedDistance);
+
+    // Outer fade in: 0.25 at sd=0, 0.71 at sd=-0.5, 1.0 at sd=-1
+    float greenOuter = smoothstep(rimGradCA, -rimGradCA, signedDistance);
+    greenOuter *= greenOuter;
+
+    // Inner fade out: 0.25 at sd=-rimDepthGreen, 1.0 at sd=-rimDepthGreen+1
+    float greenInner = smoothstep(-rimDepthGreen - rimGradCA, -rimDepthGreen + rimGradCA, signedDistance);
+    greenInner *= greenInner;
+
+    rimZoneGreen = greenOuter * greenInner;
     if (rimZoneGreen > 0.001 && rimCAGreenBias > 0.001) {
       float greenOnly = max(rimZoneGreen - rimZoneCA, 0.0);
       if (greenOnly > 0.001) {
@@ -1050,8 +1072,7 @@ vec3 _calculateTotalLighting(
     float signedDistance, float thickness,
     vec2 lightDirection, float lightIntensity, float ambientStrength,
     vec3 backgroundColor, float rimWidthPixels,
-    RimMasks masks,
-    vec2 nXyNormalized
+    RimMasks masks, vec2 nXyNormalized, float rimLightSpread
 ) {
   float thicknessFactor = smoothstep(5.0, 7.0, thickness);
   float effectiveIntensity = lightIntensity * lightIntensity;
@@ -1061,10 +1082,10 @@ vec3 _calculateTotalLighting(
   }
 
   float facingAmbient = abs(dot(nXyNormalized, lightDirection));
-  float maskAmbient = masks.band * pow(facingAmbient, 0.7);
+  float maskAmbient = masks.band * pow(facingAmbient, rimLightSpread);
 
   float facingTop = abs(nXyNormalized.y);
-  float maskTop = masks.band * pow(facingTop, 0.7);
+  float maskTop = masks.band * pow(facingTop, rimLightSpread);
 
   float verticalAlign = -nXyNormalized.y;
   float t = clamp(verticalAlign * 0.5 + 0.5, 0.0, 1.0);
@@ -1126,7 +1147,7 @@ bool _findBestGlowParams(
     float sdOwner = _sdShapeAt(targetShape, positionSdf);
 
     float widthAa = max(fwidth(sdOwner), 1e-6) * GLOW_OWNER_FEATHER_PX;
-    float inShape = smoothstep(0.0, widthAa, -sdOwner);
+    float inShape = smoothstep(0.0, widthAa, -sdOwner + 0.67 * widthAa); // ~0.75 at sd=0
 
     if (inShape <= 1e-5) continue;
 
@@ -1161,6 +1182,7 @@ bool _findBestGlowParams(
       outParams.blurSigma = d1.z;
       outParams.tintColor = d0.rgb;
       outParams.glassTarget = d3;
+
     }
   }
 
@@ -1186,6 +1208,7 @@ vec4 _applyInteractiveGlow(
     float saturation,
     vec3 backgroundColor
 ) {
+
   if (shapeIndex < 0 || uTouchCount_f <= 0.5) {
     return coloredBase;
   }
@@ -1196,6 +1219,7 @@ vec4 _applyInteractiveGlow(
   if (!_findBestGlowParams(positionSdf, shapeIndex, bestShapedValue, params)) {
     return coloredBase;
   }
+
 
   float effectiveLight = (params.lightMix > -0.5) ? mix(lightness, params.lightMix, bestShapedValue) : lightness;
   float effectiveSat = (params.satMix > -0.5) ? mix(saturation, params.satMix, bestShapedValue) : saturation;
@@ -1212,13 +1236,17 @@ vec4 _applyInteractiveGlow(
   }
 
   vec4 coloredLocal = _blendGlassTint(refractLocal, effectiveGlass);
-  coloredLocal.rgb += lighting * params.lightIntensity;
   coloredLocal.rgb = _adjustColorBalance(coloredLocal.rgb, effectiveSat, effectiveLight);
 
   vec3 tint = _computeAdaptiveHighlight(backgroundColor, 1.0);
-
   vec4 tintGlass = vec4(tint, bestShapedValue * params.colorAlpha);
   coloredLocal = _blendGlassTint(coloredLocal, tintGlass);
+
+  // Fade glow lighting boost at edge: no extra intensity at sd=0.
+  float glowEdgeFw = max(fwidth(signedDistance), 1e-6);
+  float glowLightFade = smoothstep(0.0, -2.0 * glowEdgeFw, signedDistance); // 0.0 at sd=0
+  float fadedIntensity = mix(1.0, params.lightIntensity, glowLightFade);
+  coloredLocal.rgb += lighting * fadedIntensity;
 
   return mix(coloredBase, coloredLocal, bestShapedValue);
 }
@@ -1245,7 +1273,8 @@ vec4 renderLiquidGlass(
     float saturation,
     float lightness,
     float rimWidthPixels,
-    float rimSharp,
+    float rimLightSpread,
+
     int shapeIndex,
     float opacity,
     float childThickness,
@@ -1260,14 +1289,14 @@ vec4 renderLiquidGlass(
   }
 
   float height = _calculateLiquidHeight(signedDistance, thickness);
-  RimMasks masks = _calculateRimMasks(signedDistance, rimWidthPixels, rimSharp);
+  RimMasks masks = _calculateRimMasks(signedDistance, rimWidthPixels);
   vec2 nXyNormalized = _safeNormalize(normal.xy);
-
   vec3 lighting = _calculateTotalLighting(
       signedDistance, thickness,
       lightDirection, lightIntensity, ambientStrength,
       backgroundColor.rgb, rimWidthPixels,
-      masks, nXyNormalized
+      masks, nXyNormalized,
+      rimLightSpread
   );
 
   // Compute child-specific refraction displacement
@@ -1298,6 +1327,12 @@ vec4 renderLiquidGlass(
       bgOverlay
   );
 
+  // Fade glass modifications (tint, color balance, refraction) to backgroundColor at the edge.
+  // Applied before lighting so the rim highlight is NOT faded.
+  float edgeFw = max(fwidth(signedDistance), 1e-6);
+  float edgeFade = smoothstep(-0.25 * edgeFw, -1.75 * edgeFw, signedDistance); // sd=-0.25→0, sd=-1→0.5, sd=-1.75→1.0
+  refractColorBase.rgb = mix(backgroundColor.rgb, refractColorBase.rgb, edgeFade);
+
   refractColorBase.rgb += lighting;
 
   vec4 outColor = _applyInteractiveGlow(
@@ -1307,10 +1342,7 @@ vec4 renderLiquidGlass(
   );
 
   float baseAlpha = foregroundAlpha;
-
-  float edgeAlphaGain = mix(0.20, 0.45, clamp(rimWidthPixels / 64.0, 0.0, 1.0));
-  float rimAlpha = masks.band * edgeAlphaGain;
-
+  float rimAlpha = masks.band;
   float mixAlpha = clamp(max(baseAlpha, rimAlpha), 0.0, 1.0) * opacity;
 
   return mix(backgroundColor, outColor, mixAlpha);

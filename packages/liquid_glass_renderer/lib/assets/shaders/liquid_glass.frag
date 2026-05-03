@@ -128,7 +128,7 @@ out vec4 fragColor;
 #define uNumShapes            uColorAdjust.y
 
 #define rimWidthPx            uRimParams.x
-#define rimSharpness          uRimParams.y
+#define uRimLightSpread       uRimParams.y
 
 #define uNormalPlateauWidth   uNormalParams.x
 #define uNormalSoftness       uNormalParams.y
@@ -224,7 +224,8 @@ vec2 _correctUVForTarget(vec2 uv) {
 float _calculateForegroundAlpha(float distance) {
     float w = fwidth(distance);
     float aaWidth = max(w, 1e-4);
-    return smoothstep(aaWidth, -aaWidth, distance);
+    float alpha = smoothstep(aaWidth, -aaWidth, distance);
+    return alpha * alpha; // 0.25 at sd=0
 }
 
 /// Computes the dynamic scaling factor applied to the background refraction.
@@ -293,7 +294,7 @@ void main() {
         uSaturation,
         uLightness,
         rimWidthPx,
-        rimSharpness,
+        uRimLightSpread,
         shapeIndex,
         uOpacity,
         uChildThickness,

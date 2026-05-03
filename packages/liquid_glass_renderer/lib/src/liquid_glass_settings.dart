@@ -19,7 +19,6 @@ class GlowStyle with EquatableMixin {
     this.strength = 0.0,
     this.power = 2.0,
     this.lightIntensity = 1.0,
-    this.insideOnly = true,
     this.color = const Color(0xFFFFFFFF),
   });
 
@@ -41,7 +40,6 @@ class GlowStyle with EquatableMixin {
       strength: lerpDouble(a.strength, b.strength, t)!,
       power: lerpDouble(a.power, b.power, t)!,
       lightIntensity: lerpDouble(a.lightIntensity, b.lightIntensity, t)!,
-      insideOnly: useBoolsFromB ? b.insideOnly : a.insideOnly,
       color: Color.lerp(a.color, b.color, t)!,
     );
   }
@@ -81,9 +79,6 @@ class GlowStyle with EquatableMixin {
   /// The intensity multiplier for the light source affecting the glow.
   final double lightIntensity;
 
-  /// Whether the glow should be clipped to the inside of the shape.
-  final bool insideOnly;
-
   /// The base color of the glow effect.
   final Color color;
 
@@ -98,7 +93,6 @@ class GlowStyle with EquatableMixin {
     double? strength,
     double? power,
     double? lightIntensity,
-    bool? insideOnly,
     Color? color,
   }) {
     return GlowStyle(
@@ -111,7 +105,6 @@ class GlowStyle with EquatableMixin {
       strength: strength ?? this.strength,
       power: power ?? this.power,
       lightIntensity: lightIntensity ?? this.lightIntensity,
-      insideOnly: insideOnly ?? this.insideOnly,
       color: color ?? this.color,
     );
   }
@@ -127,7 +120,6 @@ class GlowStyle with EquatableMixin {
         strength,
         power,
         lightIntensity,
-        insideOnly,
         color,
       ];
 }
@@ -230,7 +222,7 @@ class LiquidGlassSettings with EquatableMixin {
     this.saturation = 2.5,
     this.lightness = 0.64,
     this.rimWidthPx = 4.0,
-    this.rimSharpness = 0.8,
+    this.rimLightSpread = 0.8,
     this.glowStyle = const GlowStyle(),
     this.backgroundScale = const Offset(1.0, 1.0),
     this.normalPlateauWidth = 24.0,
@@ -253,7 +245,6 @@ class LiquidGlassSettings with EquatableMixin {
     double blend = 20.0,
     Color glassColor = const Color(0x00FFFFFF),
     double rimWidthPx = 1.5,
-    double rimSharpness = 0.89,
     GlowStyle glow = const GlowStyle(),
   }) : this(
           refractiveIndex: 1 + (refraction / 100) * 0.2,
@@ -268,7 +259,6 @@ class LiquidGlassSettings with EquatableMixin {
           blend: blend,
           glassColor: glassColor,
           rimWidthPx: rimWidthPx,
-          rimSharpness: rimSharpness,
           glowStyle: glow,
           backgroundScale: const Offset(1.0, 1.0),
           normalPlateauWidth: 24.0,
@@ -299,7 +289,7 @@ class LiquidGlassSettings with EquatableMixin {
       saturation: lerpDouble(a.saturation, b.saturation, t)!,
       lightness: lerpDouble(a.lightness, b.lightness, t)!,
       rimWidthPx: lerpDouble(a.rimWidthPx, b.rimWidthPx, t)!,
-      rimSharpness: lerpDouble(a.rimSharpness, b.rimSharpness, t)!,
+      rimLightSpread: lerpDouble(a.rimLightSpread, b.rimLightSpread, t)!,
       glowStyle: GlowStyle.lerp(a.glowStyle, b.glowStyle, t),
       backgroundScale: Offset.lerp(a.backgroundScale, b.backgroundScale, t)!,
       normalPlateauWidth:
@@ -348,8 +338,12 @@ class LiquidGlassSettings with EquatableMixin {
   /// The width of the rim highlight in pixels, calculated along the SDF.
   final double rimWidthPx;
 
-  /// The sharpness/falloff of the rim highlight.
-  final double rimSharpness;
+  /// Controls how wide the dark corners are in the rim lighting.
+  ///
+  /// This is the exponent for the light-facing calculation. Lower values
+  /// (e.g., 0.3) make bright areas wider (smaller dark corners). Higher values
+  /// (e.g., 2.0) make bright areas narrower (larger dark corners).
+  final double rimLightSpread;
 
   /// The configuration for the interactive glow and hotspot overlays.
   final GlowStyle glowStyle;
@@ -394,7 +388,7 @@ class LiquidGlassSettings with EquatableMixin {
     double? saturation,
     double? lightness,
     double? rimWidthPx,
-    double? rimSharpness,
+    double? rimLightSpread,
     GlowStyle? glowStyle,
     Offset? backgroundScale,
     double? normalPlateauWidth,
@@ -415,7 +409,7 @@ class LiquidGlassSettings with EquatableMixin {
       saturation: saturation ?? this.saturation,
       lightness: lightness ?? this.lightness,
       rimWidthPx: rimWidthPx ?? this.rimWidthPx,
-      rimSharpness: rimSharpness ?? this.rimSharpness,
+      rimLightSpread: rimLightSpread ?? this.rimLightSpread,
       glowStyle: glowStyle ?? this.glowStyle,
       backgroundScale: backgroundScale ?? this.backgroundScale,
       normalPlateauWidth: normalPlateauWidth ?? this.normalPlateauWidth,
@@ -439,7 +433,7 @@ class LiquidGlassSettings with EquatableMixin {
         saturation,
         lightness,
         rimWidthPx,
-        rimSharpness,
+        rimLightSpread,
         glowStyle,
         backgroundScale,
         normalPlateauWidth,

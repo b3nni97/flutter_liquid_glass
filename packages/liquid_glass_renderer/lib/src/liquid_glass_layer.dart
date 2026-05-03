@@ -716,7 +716,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       union = (union == null) ? rectLocal : union.expandToInclude(rectLocal);
     }
     final Rect unionBounds = union ?? Rect.zero;
-    final double margin = (_settings.blur * 3.0) + _settings.thickness;
+    final double margin = (_settings.blur * 3.0) + _settings.thickness + 2.0;
     return unionBounds.inflate(margin);
   }
 
@@ -958,7 +958,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       ..setFloat(_idxLightDir + 0, math.cos(_settings.lightAngle))
       ..setFloat(_idxLightDir + 1, math.sin(_settings.lightAngle))
       ..setFloat(_idxRimParams + 0, _settings.rimWidthPx)
-      ..setFloat(_idxRimParams + 1, _settings.rimSharpness)
+      ..setFloat(_idxRimParams + 1, _settings.rimLightSpread)
       ..setFloat(_idxBgScale + 0, _settings.backgroundScale.dx)
       ..setFloat(_idxBgScale + 1, _settings.backgroundScale.dy)
       ..setFloat(_idxNormalParams + 0, _settings.normalPlateauWidth)
@@ -1149,7 +1149,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
         ..setFloat(baseIdx + 4, activeStyle.power)
         ..setFloat(baseIdx + 5, activeStyle.mix)
         ..setFloat(baseIdx + 6, b)
-        ..setFloat(baseIdx + 7, activeStyle.insideOnly ? 1.0 : 0.0)
+        ..setFloat(baseIdx + 7, -1.0) // rimWidthPx removed from GlowStyle
         ..setFloat(baseIdx + 8, l)
         ..setFloat(baseIdx + 9, s)
         ..setFloat(baseIdx + 10, activeStyle.lightIntensity)

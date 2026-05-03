@@ -21,7 +21,15 @@ float calculateEllipseSDF(vec2 position, vec2 radii) {
   vec2 inverseRadii = 1.0 / safeRadii;
   float k1 = length(position * inverseRadii);
   float k2 = length(position * (inverseRadii * inverseRadii));
-  return (k1 * (k1 - 1.0)) / max(k2, 1e-4);
+
+  // Center singularity fix: k1*(k1-1)/k2 = 0/0 at the shape center.
+  // Fall back to linear approximation deep inside the shape.
+  float minR = min(safeRadii.x, safeRadii.y);
+  float centerSD = (k1 - 1.0) * minR;
+  float algebraicSD = (k1 * (k1 - 1.0)) / max(k2, 1e-4);
+
+  float blend = smoothstep(0.0, 0.1, k1);
+  return mix(centerSD, algebraicSD, blend);
 }
 
 // Calculates the signed distance field for an "Apple-style" squircle.
