@@ -24,7 +24,8 @@ class LiquidGlass extends StatelessWidget {
     super.key,
     required this.child,
   })  : _isStandalone = true,
-        glowStyle = null;
+        glowStyle = null,
+        material = null;
 
   /// Creates a liquid glass shape that joins an existing [LiquidGlassLayer].
   const LiquidGlass.inLayer({
@@ -33,6 +34,7 @@ class LiquidGlass extends StatelessWidget {
     this.clipBehavior = Clip.hardEdge,
     this.touches = const <TouchPoint>[],
     this.glowStyle,
+    this.material,
     super.key,
     required this.child,
   })  : _isStandalone = false,
@@ -62,6 +64,12 @@ class LiquidGlass extends StatelessWidget {
   /// If null in [LiquidGlass.inLayer], the layer's global settings are used.
   final GlowStyle? glowStyle;
 
+  /// Optional material override for this specific shape.
+  ///
+  /// If null, the layer's global [LiquidGlassSettings.material] is used.
+  /// Overrides tint, shade, saturation, and lightness for this shape only.
+  final GlassMaterial? material;
+
   /// The widget below this widget in the tree.
   final Widget child;
 
@@ -76,6 +84,7 @@ class LiquidGlass extends StatelessWidget {
         glassContainsChild: glassContainsChild,
         localTouches: touches,
         glow: glowStyle,
+        material: material,
         link: GlassScope.of(context),
         child: ClipPath(
           clipper: ShapeBorderClipper(shape: shape),
@@ -104,6 +113,7 @@ class _LiquidGlassShapeWidget extends SingleChildRenderObjectWidget {
     required this.glassContainsChild,
     required this.localTouches,
     required this.glow,
+    required this.material,
     required this.link,
     required super.child,
   });
@@ -120,6 +130,9 @@ class _LiquidGlassShapeWidget extends SingleChildRenderObjectWidget {
   /// Optional specific glow configuration for this shape.
   final GlowStyle? glow;
 
+  /// Optional material override for this shape.
+  final GlassMaterial? material;
+
   /// The link to the parent [LiquidGlassLayer] for coordination.
   final GlassLink link;
 
@@ -131,6 +144,7 @@ class _LiquidGlassShapeWidget extends SingleChildRenderObjectWidget {
       link: link,
       localTouches: localTouches,
       glow: glow,
+      material: material,
     );
   }
 
@@ -144,6 +158,7 @@ class _LiquidGlassShapeWidget extends SingleChildRenderObjectWidget {
       ..glassContainsChild = glassContainsChild
       ..localTouches = localTouches
       ..glow = glow
+      ..material = material
       ..link = link;
   }
 }
@@ -161,10 +176,12 @@ class RenderLiquidGlass extends RenderProxyBox {
     required GlassLink link,
     List<TouchPoint> localTouches = const <TouchPoint>[],
     GlowStyle? glow,
+    GlassMaterial? material,
   })  : _shape = shape,
         _glassContainsChild = glassContainsChild,
         _localTouches = List<TouchPoint>.from(localTouches),
         _glow = glow,
+        _material = material,
         _link = link {
     _register();
   }
@@ -201,6 +218,15 @@ class RenderLiquidGlass extends RenderProxyBox {
   set glow(GlowStyle? value) {
     if (_glow == value) return;
     _glow = value;
+    _link.notifyShapeLayoutChanged(this);
+    markNeedsPaint();
+  }
+
+  GlassMaterial? _material;
+  GlassMaterial? get material => _material;
+  set material(GlassMaterial? value) {
+    if (_material == value) return;
+    _material = value;
     _link.notifyShapeLayoutChanged(this);
     markNeedsPaint();
   }

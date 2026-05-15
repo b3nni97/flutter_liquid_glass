@@ -347,32 +347,36 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     _initHBlurInvariants();
   }
 
-  static const int _idxGlassColor = 2;
-  static const int _idxOpticalProps = 6;
-  static const int _idxLightConfig = 10;
-  static const int _idxColorAdjust = 14;
-  static const int _idxLightDir = 16;
-  static const int _idxTransform = 18;
-  static const int _idxRimParams = 34;
-  static const int _idxShapeData = 36;
+  static const int _idxGlassShade = 2;
+  static const int _idxGlassTint = 6;
+  static const int _idxOpticalProps = 10;
+  static const int _idxLightConfig = 14;
+  static const int _idxColorAdjust = 18;
+  static const int _idxLightDir = 20;
+  static const int _idxTransform = 22;
+  static const int _idxRimParams = 38;
+  static const int _idxShapeData = 40;
   static const int _shapeStride = 7;
-  static const int _idxBlurBase = 92;
-  static const int _idxBlurSamples = 96;
-  static const int _idxTouchCount = 192;
-  static const int _idxTouches = 193;
-  static const int _idxTouchOwners = 209;
-  static const int _idxGlobalBlurSigma = 213;
-  static const int _idxTouchGlowStrengths = 214;
-  static const int _idxShapeGlowData = 218;
-  static const int _idxBgScale = 346;
-  static const int _idxNormalParams = 348;
-  static const int _idxChildProjection = 350;
-  static const int _idxChildSize = 354;
-  static const int _idxKeyColor = 356;
-  static const int _idxOpacity = 359;
-  static const int _idxChildOpticalProps = 360;
-  static const int _idxChildCaSpread = 364;
-  static const int _idxBgOverlay = 365;
+  static const int _idxBlurBase = 96;
+  static const int _idxBlurSamples = 100;
+  static const int _idxTouchCount = 196;
+  static const int _idxTouches = 197;
+  static const int _idxTouchOwners = 213;
+  static const int _idxGlobalBlurSigma = 217;
+  static const int _idxTouchGlowStrengths = 218;
+  static const int _idxShapeGlowData = 222;
+  static const int _idxBgScale = 350;
+  static const int _idxNormalParams = 352;
+  static const int _idxChildProjection = 354;
+  static const int _idxChildSize = 358;
+  static const int _idxKeyColor = 360;
+  static const int _idxOpacity = 363;
+  static const int _idxChildOpticalProps = 364;
+  static const int _idxChildCaSpread = 368;
+  static const int _idxBgOverlay = 369;
+  static const int _idxShapeTints = 373;
+  static const int _idxShapeShades = 405;
+  static const int _idxShapeColorBalance = 437;
   static const int _blurIdxOpticalProps = 2;
   static const int _blurIdxColorAdjust = 6;
   static const int _blurIdxShapeData = 8;
@@ -404,6 +408,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   ui.Image _emptySamplerImage;
 
   List<RawShape>? _lastShapes;
+  List<GlassMaterial?>? _lastShapeMaterials;
   LiquidGlassSettings? _lastSettings;
   int _lastShapeCount = -1;
   Rect? _lastClipBounds;
@@ -514,7 +519,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       return;
     }
 
-    if (_settings.thickness <= 0.0 || shapes.isEmpty) {
+    if (_settings.optics.thickness <= 0.0 || shapes.isEmpty) {
       _lastShapes = null;
       _backdropHandle.layer = null;
       _paintShapeContents(context, offset, shapes, glassContainsChild: true);
@@ -524,7 +529,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     }
 
     final int shapeCount = math.min(_maxShapesPerLayer, shapes.length);
-    final double sigmaPx = _settings.blur * _devicePixelRatio;
+    final double sigmaPx = _settings.optics.blur * _devicePixelRatio;
 
     final List<_PackedSample> kernel = _getKernelAndMark(sigmaPx);
     final int nKernel = sigmaPx > 0.01
@@ -716,7 +721,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       union = (union == null) ? rectLocal : union.expandToInclude(rectLocal);
     }
     final Rect unionBounds = union ?? Rect.zero;
-    final double margin = (_settings.blur * 3.0) + _settings.thickness + 2.0;
+    final double margin = (_settings.optics.blur * 3.0) + _settings.optics.thickness + 2.0;
     return unionBounds.inflate(margin);
   }
 
@@ -802,8 +807,10 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       _lastToGlobal = toGlobal.clone();
     }
 
+    final bool materialsDirty = _shapeMaterialsChanged(shapes);
+
     // B. Material & Shapes
-    if (settingsChanged || shapesDirty || dprChanged) {
+    if (settingsChanged || shapesDirty || materialsDirty || dprChanged) {
       _uploadMaterialUniforms(shapeCount, shapes);
       _lastSettings = _settings;
       _lastShapeCount = shapeCount;
@@ -850,6 +857,31 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     if (changed) {
       _lastShapes =
           shapes.map((_ActiveShape e) => e.shape).toList(growable: false);
+    }
+    return changed;
+  }
+
+  bool _shapeMaterialsChanged(List<_ActiveShape> shapes) {
+    final List<GlassMaterial?> current = shapes
+        .map((_ActiveShape e) => e.renderObject?.material)
+        .toList(growable: false);
+
+    if (_lastShapeMaterials == null ||
+        _lastShapeMaterials!.length != current.length) {
+      _lastShapeMaterials = current;
+      return true;
+    }
+
+    bool changed = false;
+    for (int i = 0; i < current.length; i++) {
+      if (_lastShapeMaterials![i] != current[i]) {
+        changed = true;
+        break;
+      }
+    }
+
+    if (changed) {
+      _lastShapeMaterials = current;
     }
     return changed;
   }
@@ -931,7 +963,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   }
 
   void _uploadMaterialUniforms(int shapeCount, List<_ActiveShape> shapes) {
-    double thickness = _settings.thickness;
+    double thickness = _settings.optics.thickness;
     if (_restrictThickness && shapes.isNotEmpty) {
       final double smallest = shapes
           .map((_ActiveShape e) => e.shape.size.shortestSide)
@@ -939,66 +971,124 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       thickness = math.min(thickness, smallest);
     }
 
+    final GlassMaterial mat = _settings.material;
+    final GlassOptics opt = _settings.optics;
+    final GlassLighting lit = _settings.lighting;
+    final GlassGeometry geo = _settings.geometry;
+
     // 1. Upload MAIN Shader (Full Set)
     _shader
-      ..setFloat(_idxGlassColor + 0, _settings.glassColor.red / 255.0)
-      ..setFloat(_idxGlassColor + 1, _settings.glassColor.green / 255.0)
-      ..setFloat(_idxGlassColor + 2, _settings.glassColor.blue / 255.0)
-      ..setFloat(_idxGlassColor + 3, _settings.glassColor.alpha / 255.0)
-      ..setFloat(_idxOpticalProps + 0, _settings.refractiveIndex)
-      ..setFloat(_idxOpticalProps + 1, _settings.chromaticAberration)
+      ..setFloat(_idxGlassShade + 0, mat.shade.red / 255.0)
+      ..setFloat(_idxGlassShade + 1, mat.shade.green / 255.0)
+      ..setFloat(_idxGlassShade + 2, mat.shade.blue / 255.0)
+      ..setFloat(_idxGlassShade + 3, mat.shade.alpha / 255.0)
+      ..setFloat(_idxGlassTint + 0, mat.tint.red / 255.0)
+      ..setFloat(_idxGlassTint + 1, mat.tint.green / 255.0)
+      ..setFloat(_idxGlassTint + 2, mat.tint.blue / 255.0)
+      ..setFloat(_idxGlassTint + 3, mat.tint.alpha / 255.0)
+      ..setFloat(_idxOpticalProps + 0, opt.refractiveIndex)
+      ..setFloat(_idxOpticalProps + 1, opt.chromaticAberration)
       ..setFloat(_idxOpticalProps + 2, thickness)
-      ..setFloat(_idxOpticalProps + 3, _settings.blend * _devicePixelRatio)
-      ..setFloat(_idxLightConfig + 0, _settings.lightAngle)
-      ..setFloat(_idxLightConfig + 1, _settings.lightIntensity)
-      ..setFloat(_idxLightConfig + 2, _settings.ambientStrength)
-      ..setFloat(_idxLightConfig + 3, _settings.saturation)
-      ..setFloat(_idxColorAdjust + 0, _settings.lightness)
+      ..setFloat(_idxOpticalProps + 3, geo.blend * _devicePixelRatio)
+      ..setFloat(_idxLightConfig + 0, lit.angle)
+      ..setFloat(_idxLightConfig + 1, lit.intensity)
+      ..setFloat(_idxLightConfig + 2, lit.ambientStrength)
+      ..setFloat(_idxLightConfig + 3, mat.saturation)
+      ..setFloat(_idxColorAdjust + 0, mat.lightness)
       ..setFloat(_idxColorAdjust + 1, shapeCount.toDouble())
-      ..setFloat(_idxLightDir + 0, math.cos(_settings.lightAngle))
-      ..setFloat(_idxLightDir + 1, math.sin(_settings.lightAngle))
-      ..setFloat(_idxRimParams + 0, _settings.rimWidthPx)
-      ..setFloat(_idxRimParams + 1, _settings.rimLightSpread)
-      ..setFloat(_idxBgScale + 0, _settings.backgroundScale.dx)
-      ..setFloat(_idxBgScale + 1, _settings.backgroundScale.dy)
-      ..setFloat(_idxNormalParams + 0, _settings.normalPlateauWidth)
-      ..setFloat(_idxNormalParams + 1, _settings.normalSoftness)
+      ..setFloat(_idxLightDir + 0, math.cos(lit.angle))
+      ..setFloat(_idxLightDir + 1, math.sin(lit.angle))
+      ..setFloat(_idxRimParams + 0, lit.rimWidthPx)
+      ..setFloat(_idxRimParams + 1, lit.rimLightSpread)
+      ..setFloat(_idxBgScale + 0, geo.backgroundScale.dx)
+      ..setFloat(_idxBgScale + 1, geo.backgroundScale.dy)
+      ..setFloat(_idxNormalParams + 0, geo.normalPlateauWidth)
+      ..setFloat(_idxNormalParams + 1, geo.normalSoftness)
       ..setFloat(
           _idxChildOpticalProps + 0,
           _settings.childRefraction?.thickness ?? thickness)
       ..setFloat(
           _idxChildOpticalProps + 1,
-          _settings.childRefraction?.refractiveIndex ?? _settings.refractiveIndex)
+          _settings.childRefraction?.refractiveIndex ?? opt.refractiveIndex)
       ..setFloat(
           _idxChildOpticalProps + 2,
-          _settings.childRefraction?.normalPlateauWidth ?? _settings.normalPlateauWidth)
+          _settings.childRefraction?.normalPlateauWidth ?? geo.normalPlateauWidth)
       ..setFloat(
           _idxChildOpticalProps + 3,
-          _settings.childRefraction?.normalSoftness ?? _settings.normalSoftness)
+          _settings.childRefraction?.normalSoftness ?? geo.normalSoftness)
       ..setFloat(_idxChildCaSpread,
           _settings.childRefraction?.caSpread ?? 1.0)
       ..setFloat(_idxBgOverlay + 0,
-          (_settings.backgroundOverlay?.red ?? 0) / 255.0)
+          (lit.backgroundOverlay?.red ?? 0) / 255.0)
       ..setFloat(_idxBgOverlay + 1,
-          (_settings.backgroundOverlay?.green ?? 0) / 255.0)
+          (lit.backgroundOverlay?.green ?? 0) / 255.0)
       ..setFloat(_idxBgOverlay + 2,
-          (_settings.backgroundOverlay?.blue ?? 0) / 255.0)
+          (lit.backgroundOverlay?.blue ?? 0) / 255.0)
       ..setFloat(_idxBgOverlay + 3,
-          (_settings.backgroundOverlay?.alpha ?? 0) / 255.0);
+          (lit.backgroundOverlay?.alpha ?? 0) / 255.0);
 
     // 2. Upload BLUR Shader (Compact Set)
     // Only essential data for SDF
     _blurH
-      ..setFloat(_blurIdxOpticalProps + 0, _settings.refractiveIndex)
-      ..setFloat(_blurIdxOpticalProps + 1, _settings.chromaticAberration)
+      ..setFloat(_blurIdxOpticalProps + 0, opt.refractiveIndex)
+      ..setFloat(_blurIdxOpticalProps + 1, opt.chromaticAberration)
       ..setFloat(_blurIdxOpticalProps + 2, thickness)
-      ..setFloat(_blurIdxOpticalProps + 3, _settings.blend * _devicePixelRatio)
-      ..setFloat(_blurIdxColorAdjust + 0, _settings.lightness)
+      ..setFloat(_blurIdxOpticalProps + 3, geo.blend * _devicePixelRatio)
+      ..setFloat(_blurIdxColorAdjust + 0, mat.lightness)
       ..setFloat(_blurIdxColorAdjust + 1, shapeCount.toDouble());
 
     // Upload Shapes (Different Indices!)
     _uploadShapeData(_shader, shapeCount, shapes, _idxShapeData);
     _uploadShapeData(_blurH, shapeCount, shapes, _blurIdxShapeData);
+
+    // Upload per-shape tint (pre-resolved: shape override or global fallback)
+    for (int i = 0; i < _maxShapesPerLayer; i++) {
+      final int base = _idxShapeTints + (i * 4);
+      final Color t = (i < shapes.length
+              ? shapes[i].renderObject?.material?.tint
+              : null) ??
+          mat.tint;
+      _shader
+        ..setFloat(base + 0, t.red / 255.0)
+        ..setFloat(base + 1, t.green / 255.0)
+        ..setFloat(base + 2, t.blue / 255.0)
+        ..setFloat(base + 3, t.alpha / 255.0);
+    }
+
+    // Upload per-shape shade (pre-resolved: shape override or global fallback)
+    for (int i = 0; i < _maxShapesPerLayer; i++) {
+      final int base = _idxShapeShades + (i * 4);
+      final Color s = (i < shapes.length
+              ? shapes[i].renderObject?.material?.shade
+              : null) ??
+          mat.shade;
+      _shader
+        ..setFloat(base + 0, s.red / 255.0)
+        ..setFloat(base + 1, s.green / 255.0)
+        ..setFloat(base + 2, s.blue / 255.0)
+        ..setFloat(base + 3, s.alpha / 255.0);
+    }
+
+    // Upload per-shape color balance (pre-resolved: shape override or global)
+    for (int i = 0; i < _maxShapesPerLayer; i++) {
+      final int base = _idxShapeColorBalance + (i * 3);
+      final double sat = (i < shapes.length
+              ? shapes[i].renderObject?.material?.saturation
+              : null) ??
+          mat.saturation;
+      final double light = (i < shapes.length
+              ? shapes[i].renderObject?.material?.lightness
+              : null) ??
+          mat.lightness;
+      final double rimLightness = (i < shapes.length
+              ? shapes[i].renderObject?.material?.tintBrightness
+              : null) ??
+          mat.tintBrightness;
+      _shader
+        ..setFloat(base + 0, sat)
+        ..setFloat(base + 1, light)
+        ..setFloat(base + 2, rimLightness);
+    }
   }
 
   void _uploadShapeData(
@@ -1133,13 +1223,18 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       }
 
       final Color c = activeStyle.color;
-      final double l = activeStyle.lightness ?? -1.0;
-      final double s = activeStyle.saturation ?? -1.0;
+      final double l = activeStyle.material?.lightness ?? -1.0;
+      final double s = activeStyle.material?.saturation ?? -1.0;
       final double b = activeStyle.blur != null
           ? (activeStyle.blur! * _devicePixelRatio)
           : -1.0;
+      // Glow shade: use glow's shade if explicitly set (alpha > 0),
+      // otherwise fall back to per-shape shade, then global shade.
+      final Color glowShade = activeStyle.material?.shade ?? const Color(0x00FFFFFF);
+      final Color shapeShade =
+          shapes[i].renderObject?.material?.shade ?? _settings.material.shade;
       final Color glassOverride =
-          activeStyle.glassColor ?? _settings.glassColor;
+          glowShade.alpha > 0 ? glowShade : shapeShade;
 
       _shader
         ..setFloat(baseIdx + 0, c.red / 255.0)
@@ -1160,7 +1255,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
         ..setFloat(baseIdx + 15, glassOverride.alpha / 255.0);
     }
 
-    _shader.setFloat(_idxGlobalBlurSigma, _settings.blur * _devicePixelRatio);
+    _shader.setFloat(_idxGlobalBlurSigma, _settings.optics.blur * _devicePixelRatio);
   }
 
   void _combineTouches(

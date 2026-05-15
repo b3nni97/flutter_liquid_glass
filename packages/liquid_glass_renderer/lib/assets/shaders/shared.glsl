@@ -70,6 +70,16 @@ struct GlowParams {
   vec4 glassTarget;
 };
 
+/// Holds SDF-distance-weighted material parameters blended across all shapes.
+struct BlendedMaterial {
+  vec4  shade;
+  vec4  tint;
+  float saturation;
+  float lightness;
+  float tintBrightness;
+  int   tintedCount;
+};
+
 /// Calculates a pseudo-random value based on the input position.
 float _hashRefraction(vec2 position) {
   return fract(sin(dot(position, vec2(12.9898, 78.233))) * 43758.5453);
@@ -372,20 +382,92 @@ RimMasks _calculateRimMasks(float signedDistance, float rimWidthPixels) {
   return masks;
 }
 
-/// Blends a tint color into the liquid surface based on glass opacity.
-vec4 _blendGlassTint(vec4 liquidColor, vec4 glassColor) {
+/// Converts an RGB color to HSL representation.
+vec3 _rgbToHsl(vec3 c) {
+  float maxC = max(c.r, max(c.g, c.b));
+  float minC = min(c.r, min(c.g, c.b));
+  float l = (maxC + minC) * 0.5;
+  float d = maxC - minC;
+
+  if (d < 1e-6) return vec3(0.0, 0.0, l);
+
+  float s = (l > 0.5) ? d / (2.0 - maxC - minC) : d / (maxC + minC);
+
+  float h;
+  if (maxC == c.r) {
+    h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
+  } else if (maxC == c.g) {
+    h = (c.b - c.r) / d + 2.0;
+  } else {
+    h = (c.r - c.g) / d + 4.0;
+  }
+  h /= 6.0;
+
+  return vec3(h, s, l);
+}
+
+/// Helper for HSL→RGB conversion.
+float _hueToRgb(float p, float q, float t) {
+  float tt = t;
+  if (tt < 0.0) tt += 1.0;
+  if (tt > 1.0) tt -= 1.0;
+  if (tt < 1.0 / 6.0) return p + (q - p) * 6.0 * tt;
+  if (tt < 0.5)        return q;
+  if (tt < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - tt) * 6.0;
+  return p;
+}
+
+/// Converts an HSL color to RGB representation.
+vec3 _hslToRgb(vec3 hsl) {
+  if (hsl.y < 1e-6) return vec3(hsl.z);
+
+  float q = (hsl.z < 0.5)
+      ? hsl.z * (1.0 + hsl.y)
+      : hsl.z + hsl.y - hsl.z * hsl.y;
+  float p = 2.0 * hsl.z - q;
+
+  return vec3(
+    _hueToRgb(p, q, hsl.x + 1.0 / 3.0),
+    _hueToRgb(p, q, hsl.x),
+    _hueToRgb(p, q, hsl.x - 1.0 / 3.0)
+  );
+}
+
+/// Applies realistic tinted glass coloring using Hue blending + alpha-over.
+/// Mimics the SwiftUI/Android LiquidGlass approach of shifting the hue
+/// without changing luminance, then overlaying the tint color at reduced opacity.
+vec4 _applyGlassTint(vec4 baseColor, vec4 tintColor) {
+  if (tintColor.a < 0.001) return baseColor;
+
+  // Step 1: Hue blend — shift hue to tint, blend luminance toward tint (not purely base)
+  vec3 baseHSL = _rgbToHsl(baseColor.rgb);
+  vec3 tintHSL = _rgbToHsl(tintColor.rgb);
+
+  // Luminance blend proportional to tint alpha.
+  // At alpha=1.0 the tint fully controls luminance — pure primaries
+  // reproduce exactly (#FF0000 → #FF0000). Subtle background variation
+  // for mixed colors comes from refraction sampling, not this blend.
+  float blendedL = mix(baseHSL.z, tintHSL.z, tintColor.a);
+  vec3 hueBlended = _hslToRgb(vec3(tintHSL.x, tintHSL.y, blendedL));
+  vec3 result = mix(baseColor.rgb, hueBlended, tintColor.a);
+
+  return vec4(result, baseColor.a);
+}
+
+/// Applies a shade (brightness) blend using Multiply/Screen based on luminance.
+vec4 _blendGlassShade(vec4 liquidColor, vec4 glassShade) {
   vec4 finalColor = liquidColor;
-  if (glassColor.a > 0.0) {
-    float glassLuminance = dot(glassColor.rgb, vec3(0.299, 0.587, 0.114));
+  if (glassShade.a > 0.0) {
+    float glassLuminance = dot(glassShade.rgb, vec3(0.299, 0.587, 0.114));
     float isDark = step(glassLuminance, 0.5);
 
-    vec3 darkened = liquidColor.rgb * (glassColor.rgb * 2.0);
+    vec3 darkened = liquidColor.rgb * (glassShade.rgb * 2.0);
     vec3 invLiquid = vec3(1.0) - liquidColor.rgb;
-    vec3 invGlass = vec3(1.0) - glassColor.rgb;
+    vec3 invGlass = vec3(1.0) - glassShade.rgb;
     vec3 screened = vec3(1.0) - (invLiquid * invGlass);
 
     vec3 targetRGB = mix(screened, darkened, isDark);
-    finalColor.rgb = mix(liquidColor.rgb, targetRGB, glassColor.a);
+    finalColor.rgb = mix(liquidColor.rgb, targetRGB, glassShade.a);
     finalColor.a = liquidColor.a;
   }
   return finalColor;
@@ -443,12 +525,14 @@ vec3 _compositeChildOnBg(
     sampler2D childTexture,
     vec2 childUV,
     vec3 keyColor,
-    vec4 glassColor,
+    vec4 glassShade,
+    vec4 glassTint,
     float saturation,
     float lightness
 ) {
-  bgSample = _blendGlassTint(bgSample, glassColor);
+  bgSample = _blendGlassShade(bgSample, glassShade);
   bgSample.rgb = _adjustColorBalance(bgSample.rgb, saturation, lightness);
+  bgSample = _applyGlassTint(bgSample, glassTint);
 
   vec4 childSample = _sampleTexture(childTexture, childUV);
   if (childSample.a <= 0.001) {
@@ -475,7 +559,8 @@ vec4 _resolveDispersion(
     vec3 keyColor,
     float saturation,
     float lightness,
-    vec4 glassColor,
+    vec4 glassShade,
+    vec4 glassTint,
     float signedDistance,
     vec3 normal,
     float thickness,
@@ -654,15 +739,15 @@ vec4 _resolveDispersion(
   vec3 colorPos = vec3(0.0);
   {
     vec3 p0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUV*1.1),
-        childTexture, childUVRefracted + dispersedUV*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted + dispersedUV*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
     vec3 p1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUV*0.75),
-        childTexture, childUVRefracted + dispersedUV*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted + dispersedUV*childCaScale*0.75, keyColor, glassShade, glassTint, saturation, lightness);
     vec3 p2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUV*0.25),
-        childTexture, childUVRefracted + dispersedUV*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted + dispersedUV*childCaScale*0.25, keyColor, glassShade, glassTint, saturation, lightness);
     vec3 p4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUV*0.8),
-        childTexture, childUVRefracted - dispersedUV*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted - dispersedUV*childCaScale*0.8, keyColor, glassShade, glassTint, saturation, lightness);
     vec3 p5 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUV*1.1),
-        childTexture, childUVRefracted - dispersedUV*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted - dispersedUV*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
     colorPos.r = p0.r * 0.50 + p1.r * 0.50;
     colorPos.g = p2.g;
     colorPos.b = p4.b * 0.50 + p5.b * 0.50;
@@ -674,15 +759,15 @@ vec4 _resolveDispersion(
     pass1Color = colorPos;
   } else if (flipT < 0.001) {
     vec3 n0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUVNeg*1.1),
-        childTexture, childUVRefracted - dispersedUVNeg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted - dispersedUVNeg*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
     vec3 n1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUVNeg*0.75),
-        childTexture, childUVRefracted - dispersedUVNeg*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted - dispersedUVNeg*childCaScale*0.75, keyColor, glassShade, glassTint, saturation, lightness);
     vec3 n2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*0.25),
-        childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.25, keyColor, glassShade, glassTint, saturation, lightness);
     vec3 n4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*0.8),
-        childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.8, keyColor, glassShade, glassTint, saturation, lightness);
     vec3 n5 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*1.1),
-        childTexture, childUVRefracted + dispersedUVNeg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+        childTexture, childUVRefracted + dispersedUVNeg*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
     vec3 colorNeg = vec3(0.0);
     colorNeg.r = n0.r * 0.50 + n1.r * 0.50;
     colorNeg.g = n2.g;
@@ -692,15 +777,15 @@ vec4 _resolveDispersion(
     vec3 colorNeg = vec3(0.0);
     {
       vec3 n0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUVNeg*1.1),
-          childTexture, childUVRefracted - dispersedUVNeg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted - dispersedUVNeg*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 n1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedUVNeg*0.75),
-          childTexture, childUVRefracted - dispersedUVNeg*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted - dispersedUVNeg*childCaScale*0.75, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 n2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*0.25),
-          childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.25, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 n4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*0.8),
-          childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedUVNeg*childCaScale*0.8, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 n5 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedUVNeg*1.1),
-          childTexture, childUVRefracted + dispersedUVNeg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedUVNeg*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
       colorNeg.r = n0.r * 0.50 + n1.r * 0.50;
       colorNeg.g = n2.g;
       colorNeg.b = n4.b * 0.50 + n5.b * 0.50;
@@ -724,15 +809,15 @@ vec4 _resolveDispersion(
     vec3 p2Pos = vec3(0.0);
     {
       vec3 q0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2*1.1),
-          childTexture, childUVRefracted + dispersedP2*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedP2*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2*0.75),
-          childTexture, childUVRefracted + dispersedP2*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedP2*childCaScale*0.75, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2*0.25),
-          childTexture, childUVRefracted + dispersedP2*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedP2*childCaScale*0.25, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q3 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2*0.8),
-          childTexture, childUVRefracted - dispersedP2*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted - dispersedP2*childCaScale*0.8, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2*1.1),
-          childTexture, childUVRefracted - dispersedP2*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted - dispersedP2*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
       p2Pos.b = q0.b * 0.50 + q1.b * 0.50;
       p2Pos.g = q2.g;
       p2Pos.r = q3.r * 0.50 + q4.r * 0.50;
@@ -743,15 +828,15 @@ vec4 _resolveDispersion(
     } else if (flipT < 0.001) {
       // Pass 2 NEGATIVE direction (inverted R↔B, 5-tap)
       vec3 q0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2Neg*1.1),
-          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2Neg*0.75),
-          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*0.75, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*0.25),
-          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.25, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q3 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*0.8),
-          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.8, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*1.1),
-          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 p2Neg = vec3(0.0);
       p2Neg.b = q0.b * 0.50 + q1.b * 0.50;
       p2Neg.g = q2.g;
@@ -760,15 +845,15 @@ vec4 _resolveDispersion(
     } else {
       // Transition: compute negative and blend (5-tap)
       vec3 q0 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2Neg*1.1),
-          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q1 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV - dispersedP2Neg*0.75),
-          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*0.75, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted - dispersedP2Neg*childCaScale*0.75, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q2 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*0.25),
-          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.25, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.25, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q3 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*0.8),
-          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.8, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*0.8, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 q4 = _compositeChildOnBg(_sampleTexture(backgroundTexture, refractedUV + dispersedP2Neg*1.1),
-          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*1.1, keyColor, glassColor, saturation, lightness);
+          childTexture, childUVRefracted + dispersedP2Neg*childCaScale*1.1, keyColor, glassShade, glassTint, saturation, lightness);
       vec3 p2Neg = vec3(0.0);
       p2Neg.b = q0.b * 0.50 + q1.b * 0.50;
       p2Neg.g = q2.g;
@@ -801,7 +886,8 @@ vec4 _calculateRefractionLayer(
     int shapeIndex,
     float saturation,
     float lightness,
-    vec4 glassColor,
+    vec4 glassShade,
+    vec4 glassTint,
     vec4 bgOverlay
 ) {
   vec3 incident = vec3(0.0, 0.0, -1.0);
@@ -843,8 +929,9 @@ vec4 _calculateRefractionLayer(
     backgroundSample.rgb = mix(backgroundSample.rgb, bgOverlay.rgb, bgOverlay.a);
   }
 
-  backgroundSample = _blendGlassTint(backgroundSample, glassColor);
+  backgroundSample = _blendGlassShade(backgroundSample, glassShade);
   backgroundSample.rgb = _adjustColorBalance(backgroundSample.rgb, saturation, lightness);
+  backgroundSample = _applyGlassTint(backgroundSample, glassTint);
 
   vec4 childSample = _blurJitterRefraction(childTexture, uvChild, blurRadius, sizePixels, uvChild);
   vec3 childRGB = childSample.rgb / max(childSample.a, 1.0e-4);
@@ -869,7 +956,7 @@ vec4 _calculateRefractionLayer(
       caUvBase, uvChild, caRefractionDisplacement,
       sizePixels,
       backgroundTexture, childTexture, shapeIndex, ca,
-      keyColor, saturation, lightness, glassColor,
+      keyColor, saturation, lightness, glassShade, glassTint,
       signedDistance, normal, thickness, refractiveIndex
   );
 
@@ -1067,12 +1154,61 @@ vec4 _calculateRefractionLayer(
   return vec4(clamp(finalRGB, 0.0, 1.0), backgroundSample.a);
 }
 
+/// Computes a rim highlight color derived from the glass tint.
+/// Pushes saturation to maximum and shifts hue toward the nearest
+/// secondary color axis (Yellow=60°, Cyan=180°, Magenta=300°).
+/// Shift strength depends on distance from primary AND lightness offset
+/// from 0.50 — pure primaries (L=0.5) stay unchanged.
+vec3 _computeRimTintHighlight(vec3 tintRGB, float tintBrightness) {
+  vec3 hsl = _rgbToHsl(tintRGB);
+
+  // Each hue sits in a 60° sector between a primary (0°,120°,240°)
+  // and a secondary (60°,180°,300°). The rim shifts toward the
+  // secondary end of the sector.
+  float hDeg = hsl.x * 360.0;
+  float sectorF = hDeg / 60.0;
+  float sectorBase = floor(sectorF) * 60.0;
+  float sectorPos = (hDeg - sectorBase) / 60.0;
+
+  // Even sectors (0,2,4): Primary→Secondary; odd (1,3,5): Secondary→Primary.
+  int sectorIdx = int(floor(sectorF));
+  float secondaryDir;
+  float distFromPrimary;
+  if (sectorIdx == 0 || sectorIdx == 2 || sectorIdx == 4) {
+    secondaryDir = 1.0;
+    distFromPrimary = sectorPos;
+  } else {
+    secondaryDir = -1.0;
+    distFromPrimary = 1.0 - sectorPos;
+  }
+
+  // Shift strength driven primarily by lightness distance from 0.50.
+  // Colors at L=0.5 (pure primaries) don't shift; lighter/darker colors
+  // shift toward the secondary. Squared for smooth onset near L=0.5.
+  // Calibrated: purple (L=0.70, lOff=0.392) → +41°, cyan (L=0.62, lOff=0.232) → ~13°
+  float lOffset = abs(hsl.z - 0.50) * 2.0; // 0..1, 0 at L=0.5
+  float shiftFactor = lOffset * lOffset; // squared: 0.154 for purple, 0.054 for cyan
+  float maxShiftDeg = 270.0; // 0.154 × 270 ≈ 41°, 0.054 × 270 ≈ 14°
+  float shiftDeg = shiftFactor * maxShiftDeg * secondaryDir;
+  hsl.x = fract((hDeg + shiftDeg) / 360.0);
+
+  // Push saturation to 1.0
+  hsl.y = 1.0;
+
+  // Lightness: use the per-shape configurable target from GlassMaterial.tintBrightness.
+  // Dark mode: 0.78 (vivid, ref L≈0.785), Light mode: 0.86 (pastel, ref L≈0.832).
+  hsl.z = mix(hsl.z, tintBrightness, 0.85);
+
+  return _hslToRgb(hsl);
+}
+
 /// Calculates the combined lighting effect including rim, ambient, and core highlight components.
 vec3 _calculateTotalLighting(
     float signedDistance, float thickness,
     vec2 lightDirection, float lightIntensity, float ambientStrength,
     vec3 backgroundColor, float rimWidthPixels,
-    RimMasks masks, vec2 nXyNormalized, float rimLightSpread
+    RimMasks masks, vec2 nXyNormalized, float rimLightSpread,
+    vec4 glassTint, float tintBrightness
 ) {
   float thicknessFactor = smoothstep(5.0, 7.0, thickness);
   float effectiveIntensity = lightIntensity * lightIntensity;
@@ -1092,6 +1228,17 @@ vec3 _calculateTotalLighting(
   float highlightGradient = smoothstep(0.9, 1.0, t) * float(LG_RIM_TOP_HIGHLIGHT_STRENGTH);
 
   vec3 highlightColor = _computeAdaptiveHighlight(backgroundColor, 0.7);
+  vec3 ambientRimColor = _computeAdaptiveHighlight(backgroundColor, 0.4);
+
+  // When tint is active, override rim highlight with tint-derived color.
+  // The tint-based rim dominates (~95%) to keep the rim color consistent
+  // across different backgrounds, matching reference behavior.
+  if (glassTint.a > 0.001) {
+    vec3 tintRim = _computeRimTintHighlight(glassTint.rgb, tintBrightness);
+    float tintInfluence = glassTint.a * 0.95; // 95% tint, 5% background
+    highlightColor = mix(highlightColor, tintRim, tintInfluence);
+    ambientRimColor = mix(ambientRimColor, tintRim * 0.6, tintInfluence);
+  }
 
   vec3 directionalRim = highlightColor * highlightGradient * effectiveIntensity;
   directionalRim *= maskTop;
@@ -1100,7 +1247,6 @@ vec3 _calculateTotalLighting(
   float tAmb = ambientAlign * 0.5 + 0.5;
   float ambientGrad = mix(0.92, 1.0, tAmb);
 
-  vec3 ambientRimColor = _computeAdaptiveHighlight(backgroundColor, 0.4);
   vec3 ambientRim = ambientRimColor * ambientStrength * ambientGrad;
   ambientRim *= maskAmbient;
 
@@ -1206,7 +1352,9 @@ vec4 _applyInteractiveGlow(
     vec3 lighting,
     float lightness,
     float saturation,
-    vec3 backgroundColor
+    vec3 backgroundColor,
+    vec4 blendedShade,
+    vec4 blendedTint
 ) {
 
   if (shapeIndex < 0 || uTouchCount_f <= 0.5) {
@@ -1223,7 +1371,9 @@ vec4 _applyInteractiveGlow(
 
   float effectiveLight = (params.lightMix > -0.5) ? mix(lightness, params.lightMix, bestShapedValue) : lightness;
   float effectiveSat = (params.satMix > -0.5) ? mix(saturation, params.satMix, bestShapedValue) : saturation;
-  vec4 effectiveGlass = mix(uGlassColor, params.glassTarget, bestShapedValue);
+  // Use blended material shade/tint instead of raw uniform lookups,
+  // so the glow respects the tint-ownership blending from _blendShapeMaterials.
+  vec4 effectiveGlass = mix(blendedShade, params.glassTarget, bestShapedValue);
 
   vec4 refractLocal = refractColorBase;
   float extraSigma = (params.blurSigma > -0.5) ? max(params.blurSigma - uGlobalBlurSigma, 0.0) : 0.0;
@@ -1235,12 +1385,14 @@ vec4 _applyInteractiveGlow(
     refractLocal = mix(refractLocal, childColor, childColor.a);
   }
 
-  vec4 coloredLocal = _blendGlassTint(refractLocal, effectiveGlass);
+  vec4 coloredLocal = _blendGlassShade(refractLocal, effectiveGlass);
+  coloredLocal = _applyGlassTint(coloredLocal, blendedTint);
+  // Apply sat/light after tint so the glow boost affects the tinted color.
   coloredLocal.rgb = _adjustColorBalance(coloredLocal.rgb, effectiveSat, effectiveLight);
 
   vec3 tint = _computeAdaptiveHighlight(backgroundColor, 1.0);
   vec4 tintGlass = vec4(tint, bestShapedValue * params.colorAlpha);
-  coloredLocal = _blendGlassTint(coloredLocal, tintGlass);
+  coloredLocal = _blendGlassShade(coloredLocal, tintGlass);
 
   // Fade glow lighting boost at edge: no extra intensity at sd=0.
   float glowEdgeFw = max(fwidth(signedDistance), 1e-6);
@@ -1251,7 +1403,237 @@ vec4 _applyInteractiveGlow(
   return mix(coloredBase, coloredLocal, bestShapedValue);
 }
 
+/// Returns the shape index of the currently touched tinted shape, or -1 if none.
+int _findTouchedTintedShape(int shapeCount) {
+  int count = int(uTouchCount_f);
+  for (int i = 0; i < 8; i++) {
+    if (i >= count) break;
+    int owner = int(floor(uTouchOwners[i] + 0.5));
+    if (owner >= 0 && owner < shapeCount && uShapeTints[owner].a > 0.001) {
+      return owner;
+    }
+  }
+  return -1;
+}
+
+/// Overrides shapeIndex to the closest tinted shape the pixel is inside of.
+/// Stabilizes the distortion center in the merge zone, preventing flicker
+/// from shapeIndex flipping between frames.
+/// NOTE: No touch priority here — distortion UV must be stable.
+/// Touch priority is only in _blendShapeMaterials (continuous params).
+int _resolveTintedShapeIndex(vec2 localPoint, int shapeCount, int primaryShapeIndex) {
+  if (shapeCount <= 1) return primaryShapeIndex;
+
+  float bestSD = 0.0; // only override when inside (sd < 0)
+  int result = primaryShapeIndex;
+
+  for (int i = 0; i < MAX_SHAPES; i++) {
+    if (i >= shapeCount) break;
+    if (uShapeTints[i].a < 0.001) continue;
+    float sd = _sdShapeAt(i, localPoint);
+    if (sd < bestSD) {
+      bestSD = sd;
+      result = i;
+    }
+  }
+  return result;
+}
+
+/// Resolves per-shape material parameters for the current pixel.
+/// Hard override: if inside a tinted shape, ALL params come from that shape.
+/// The merge-zone bleed in _applyTintBleed handles the visual transition
+/// at the tinted→non-tinted boundary.
+BlendedMaterial _blendShapeMaterials(
+    vec2 localPoint, int shapeCount, int primaryShapeIndex, float sdUnion
+) {
+  BlendedMaterial mat;
+
+  // Default: closest shape's parameters from the union SDF.
+  mat.shade          = uShapeShades[primaryShapeIndex];
+  mat.tint           = uShapeTints[primaryShapeIndex];
+  mat.saturation     = uShapeColorBalance[primaryShapeIndex].x;
+  mat.lightness      = uShapeColorBalance[primaryShapeIndex].y;
+  mat.tintBrightness = uShapeColorBalance[primaryShapeIndex].z;
+
+  // Single shape: just apply tint AA at boundary.
+  if (shapeCount <= 1) {
+    mat.tintedCount = (mat.tint.a > 0.001) ? 1 : 0;
+    if (mat.tint.a > 0.001) {
+      float sd  = _sdShapeAt(0, localPoint);
+      float tFw = max(fwidth(sd), 1e-6) * 1.5;
+      mat.tint.a *= smoothstep(tFw, -tFw, sd);
+    }
+    return mat;
+  }
+
+  // Find touched tinted shape (for 2-tinted priority).
+  int touchedTinted = _findTouchedTintedShape(shapeCount);
+
+  // Unified proximity blend: ALL tinted shapes contribute based on SDF proximity.
+  {
+    vec3 blendTintRgb = vec3(0.0);
+    float blendTintA = 0.0;
+    vec4 blendShade = vec4(0.0);
+    float blendSat = 0.0, blendLight = 0.0, blendTintBr = 0.0;
+    float totalW = 0.0;
+
+    int tintedCount = 0;
+    for (int tc = 0; tc < MAX_SHAPES; tc++) {
+      if (tc >= shapeCount) break;
+      if (uShapeTints[tc].a > 0.001) tintedCount++;
+    }
+
+    for (int i = 0; i < MAX_SHAPES; i++) {
+      if (i >= shapeCount) break;
+      if (uShapeTints[i].a < 0.001) continue;
+      float sd = _sdShapeAt(i, localPoint);
+      float fw = max(fwidth(sd), 1e-6);
+
+      float w;
+      if (tintedCount >= 2) {
+        // 2+ tinted: smooth weight via insideness for AA.
+        float insideness = 1.0 - smoothstep(-fw * 0.75, fw * 0.75, sd);
+        w = (insideness > 0.001) ? insideness / (1.0 + max(0.0, -sd) / fw) : 0.0;
+      } else {
+        // 1-tinted: hard cutoff (shade fix handles transition).
+        w = (sd < 0.0) ? 1.0 / (1.0 + abs(sd) / fw) : 0.0;
+      }
+
+      if (w < 0.001) continue;
+      blendTintRgb += uShapeTints[i].rgb * w;
+      blendTintA   += uShapeTints[i].a * w;
+      blendShade   += uShapeShades[i] * w;
+      blendSat     += uShapeColorBalance[i].x * w;
+      blendLight   += uShapeColorBalance[i].y * w;
+      blendTintBr  += uShapeColorBalance[i].z * w;
+      totalW += w;
+    }
+    mat.tintedCount = tintedCount;
+    if (totalW > 0.001) {
+      float inv = 1.0 / totalW;
+      mat.tint.rgb       = blendTintRgb * inv;
+      mat.tint.a         = blendTintA * inv;
+      mat.shade          = blendShade * inv;
+      mat.saturation     = blendSat * inv;
+      mat.lightness      = blendLight * inv;
+      mat.tintBrightness = blendTintBr * inv;
+    }
+
+    // Smooth tint AA: mix toward the dominant tinted shape at its boundary.
+    // Uses touched shape if active, otherwise finds closest tinted shape.
+    int aaIdx = touchedTinted;
+    if (aaIdx < 0) {
+      // No touch: find the closest tinted shape for AA.
+      float bestAASd = 1e6;
+      for (int i = 0; i < MAX_SHAPES; i++) {
+        if (i >= shapeCount) break;
+        if (uShapeTints[i].a < 0.001) continue;
+        float sd = _sdShapeAt(i, localPoint);
+        if (sd < bestAASd) { bestAASd = sd; aaIdx = i; }
+      }
+    }
+    if (aaIdx >= 0 && tintedCount >= 2) {
+      // 2+ tinted only: mix toward touched/closest tinted shape at boundary.
+      float sdT = _sdShapeAt(aaIdx, localPoint);
+      float fwT = max(fwidth(sdT), 1e-6);
+      float tintMix = 1.0 - smoothstep(-fwT * 1.5, fwT * 1.5, sdT);
+      if (tintMix > 0.001) {
+        mat.tint.rgb       = mix(mat.tint.rgb, uShapeTints[aaIdx].rgb, tintMix);
+        mat.tint.a         = mix(mat.tint.a, uShapeTints[aaIdx].a, tintMix);
+        mat.shade          = mix(mat.shade, uShapeShades[aaIdx], tintMix);
+        mat.saturation     = mix(mat.saturation, uShapeColorBalance[aaIdx].x, tintMix);
+        mat.lightness      = mix(mat.lightness, uShapeColorBalance[aaIdx].y, tintMix);
+        mat.tintBrightness = mix(mat.tintBrightness, uShapeColorBalance[aaIdx].z, tintMix);
+      }
+    }
+
+    if (totalW < 0.001 && mat.tint.a > 0.001) {
+      // Neck: pixel is outside all tinted shapes but has tint from primaryShapeIndex.
+      // Find 2 closest tinted shapes and mix at equidistant line over 3px.
+      int idx1 = -1, idx2 = -1;
+      float sd1 = 1e6, sd2 = 1e6;
+      for (int i = 0; i < MAX_SHAPES; i++) {
+        if (i >= shapeCount) break;
+        if (uShapeTints[i].a < 0.001) continue;
+        float sd = _sdShapeAt(i, localPoint);
+        if (sd < sd1) { sd2 = sd1; idx2 = idx1; sd1 = sd; idx1 = i; }
+        else if (sd < sd2) { sd2 = sd; idx2 = i; }
+      }
+      if (idx1 >= 0 && idx2 >= 0) {
+        float relDiff = sd1 - sd2;
+        float relFw = max(fwidth(relDiff), 1e-6);
+        float mixF = smoothstep(-relFw * 1.5, relFw * 1.5, relDiff);
+        mat.tint.rgb       = mix(uShapeTints[idx1].rgb, uShapeTints[idx2].rgb, mixF);
+        mat.tint.a         = mix(uShapeTints[idx1].a, uShapeTints[idx2].a, mixF);
+        mat.shade          = mix(uShapeShades[idx1], uShapeShades[idx2], mixF);
+        mat.saturation     = mix(uShapeColorBalance[idx1].x, uShapeColorBalance[idx2].x, mixF);
+        mat.lightness      = mix(uShapeColorBalance[idx1].y, uShapeColorBalance[idx2].y, mixF);
+        mat.tintBrightness = mix(uShapeColorBalance[idx1].z, uShapeColorBalance[idx2].z, mixF);
+      } else if (idx1 >= 0) {
+        mat.tint           = uShapeTints[idx1];
+        mat.shade          = uShapeShades[idx1];
+        mat.saturation     = uShapeColorBalance[idx1].x;
+        mat.lightness      = uShapeColorBalance[idx1].y;
+        mat.tintBrightness = uShapeColorBalance[idx1].z;
+      }
+    }
+
+    // Tint AA at union boundary (outer edge).
+    float uFw = max(fwidth(sdUnion), 1e-6) * 1.5;
+    mat.tint.a *= 1.0 - smoothstep(-uFw, uFw, sdUnion);
+  }
+
+  return mat;
+}
+
+/// Applies tint bleed: colored light leaking from tinted shapes.
+/// Onset starts ~2px inside shape, reaching full at edge.
+/// Touch priority: only the touched shape bleeds when active.
+vec4 _applyTintBleed(
+    vec4 color, vec2 localPoint, int shapeCount,
+    float sdUnion, float foregroundAlpha
+) {
+  if (foregroundAlpha < 0.001) return color;
+
+  // Touch priority: only touched shape bleeds. No touch: first tinted wins.
+  int bleedTouched = _findTouchedTintedShape(shapeCount);
+  if (bleedTouched < 0) {
+    for (int j = 0; j < MAX_SHAPES; j++) {
+      if (j >= shapeCount) break;
+      if (uShapeTints[j].a > 0.001) { bleedTouched = j; break; }
+    }
+  }
+
+  for (int i = 0; i < MAX_SHAPES; i++) {
+    if (i >= shapeCount) break;
+    if (uShapeTints[i].a < 0.001) continue;
+    if (bleedTouched >= 0 && i != bleedTouched) continue;
+
+    float sdOwn = _sdShapeAt(i, localPoint);
+    float fw = max(fwidth(sdOwn), 1e-6);
+
+    // Allow bleed to start 1px inside shape (overlaps tint AA zone).
+    if (sdOwn <= -fw) continue;
+
+    float bleedRange = 30.0;
+    if (sdOwn >= bleedRange) continue;
+
+    // Onset: 0 at -2px, 0.5 at -1px, 1 at edge.
+    float onset = smoothstep(-2.0 * fw, 0.0, sdOwn);
+    float distFade = smoothstep(bleedRange, 0.0, sdOwn);
+    float bleedFade = onset * distFade * distFade;
+
+    vec3 bleedColor = uShapeTints[i].rgb * 1.3;
+    float bleedStrength = bleedFade * uShapeTints[i].a * 0.85 * foregroundAlpha;
+    color.rgb = mix(color.rgb, bleedColor, bleedStrength);
+  }
+
+  return color;
+}
+
 /// Renders the complete liquid glass effect, composing refraction, lighting, and glow layers.
+/// Internally resolves per-shape material parameters via SDF-weighted blending,
+/// supporting multiple tinted shapes with smooth merge-zone transitions.
 vec4 renderLiquidGlass(
     vec2 screenUV,
     vec2 childUVBase,
@@ -1261,7 +1643,6 @@ vec4 renderLiquidGlass(
     float thickness,
     float refractiveIndex,
     float chromaticAberration,
-    vec4 glassColor,
     vec2 lightDirection,
     float lightIntensity,
     float ambientStrength,
@@ -1270,22 +1651,43 @@ vec4 renderLiquidGlass(
     sampler2D childTexture,
     vec3 normal,
     float foregroundAlpha,
-    float saturation,
-    float lightness,
     float rimWidthPixels,
     float rimLightSpread,
-
     int shapeIndex,
     float opacity,
     float childThickness,
     float childRefractiveIndex,
     vec3 childNormal,
-    vec4 bgOverlay
+    vec4 bgOverlay,
+    int shapeCount
 ) {
   vec4 backgroundColor = _sampleTexture(backgroundTexture, screenUV);
 
   if (foregroundAlpha < 0.001 || thickness < 0.01 || opacity < 0.001) {
     return backgroundColor;
+  }
+
+  // Resolve per-shape material parameters via SDF-weighted blending.
+  BlendedMaterial mat = _blendShapeMaterials(position, shapeCount, shapeIndex, signedDistance);
+
+  // 1-tinted AA: fade tint.a AND transition shade at boundary.
+  // Both use the same smoothstep → correlated → no dark/bright artifacts.
+  if (shapeCount > 1 && mat.tintedCount == 1 && mat.tint.a > 0.001) {
+    int tIdx = -1, uIdx = -1;
+    for (int i = 0; i < MAX_SHAPES; i++) {
+      if (i >= shapeCount) break;
+      if (uShapeTints[i].a > 0.001) { tIdx = i; }
+      else if (uIdx < 0) { uIdx = i; }
+    }
+    if (tIdx >= 0 && uIdx >= 0) {
+      float sdOwn = _sdShapeAt(tIdx, position);
+      float tFw = max(fwidth(sdOwn), 1e-6);
+      float inside = smoothstep(tFw, -tFw, sdOwn);
+      mat.tint.a *= inside;
+      mat.shade      = mix(uShapeShades[uIdx], uShapeShades[tIdx], inside);
+      mat.saturation = mix(uShapeColorBalance[uIdx].x, uShapeColorBalance[tIdx].x, inside);
+      mat.lightness  = mix(uShapeColorBalance[uIdx].y, uShapeColorBalance[tIdx].y, inside);
+    }
   }
 
   float height = _calculateLiquidHeight(signedDistance, thickness);
@@ -1296,7 +1698,8 @@ vec4 renderLiquidGlass(
       lightDirection, lightIntensity, ambientStrength,
       backgroundColor.rgb, rimWidthPixels,
       masks, nXyNormalized,
-      rimLightSpread
+      rimLightSpread,
+      mat.tint, mat.tintBrightness
   );
 
   // Compute child-specific refraction displacement
@@ -1323,23 +1726,41 @@ vec4 renderLiquidGlass(
       refractionDisplacement, rawRefractionTexture,
       childRefractionDisplacement,
       shapeIndex,
-      saturation, lightness, glassColor,
+      mat.saturation, mat.lightness, mat.shade, mat.tint,
       bgOverlay
   );
 
   // Fade glass modifications (tint, color balance, refraction) to backgroundColor at the edge.
   // Applied before lighting so the rim highlight is NOT faded.
   float edgeFw = max(fwidth(signedDistance), 1e-6);
-  float edgeFade = smoothstep(-0.25 * edgeFw, -1.75 * edgeFw, signedDistance); // sd=-0.25→0, sd=-1→0.5, sd=-1.75→1.0
+  float edgeFade = smoothstep(-0.25 * edgeFw, -1.75 * edgeFw, signedDistance);
   refractColorBase.rgb = mix(backgroundColor.rgb, refractColorBase.rgb, edgeFade);
 
   refractColorBase.rgb += lighting;
 
+  // Rim tint override: blend the pixel toward the tint-derived rim color
+  // at the rim edge. Modulated by light-facing so the tint fades in dark
+  // corners just like the rim lighting itself does.
+  if (mat.tint.a > 0.001) {
+    vec3 rimTintTarget = _computeRimTintHighlight(mat.tint.rgb, mat.tintBrightness);
+
+    float facingAmbient = abs(dot(nXyNormalized, lightDirection));
+    float directionalFade = pow(facingAmbient, rimLightSpread);
+
+    float blendScale = mix(0.90, 0.97, smoothstep(0.78, 0.95, mat.tintBrightness));
+    float rimTintBlend = masks.band * directionalFade * mat.tint.a * blendScale;
+    refractColorBase.rgb = mix(refractColorBase.rgb, rimTintTarget, rimTintBlend);
+  }
+
   vec4 outColor = _applyInteractiveGlow(
       refractColorBase, rawRefractionTexture, screenUV, refractionDisplacement, childUVBase,
       position, signedDistance, shapeIndex, size, backgroundTexture, childTexture,
-      lighting, lightness, saturation, backgroundColor.rgb
+      lighting, mat.lightness, mat.saturation, backgroundColor.rgb,
+      mat.shade, mat.tint
   );
+
+  // Apply tint bleed from all tinted shapes.
+  outColor = _applyTintBleed(outColor, position, shapeCount, signedDistance, foregroundAlpha);
 
   float baseAlpha = foregroundAlpha;
   float rimAlpha = masks.band;

@@ -12,5 +12,12 @@ export 'src/liquid_glass_opacity.dart'
     show GlassOpacityScope, LiquidGlassAnimatedOpacity, LiquidGlassOpacity;
 export 'src/liquid_glass_renderer.dart';
 export 'src/liquid_glass_settings.dart'
-    show ChildRefractionStyle, GlowStyle, LiquidGlassSettings;
+    show
+        ChildRefractionStyle,
+        GlassGeometry,
+        GlassLighting,
+        GlassMaterial,
+        GlassOptics,
+        GlowStyle,
+        LiquidGlassSettings;
 export 'src/liquid_shape.dart';

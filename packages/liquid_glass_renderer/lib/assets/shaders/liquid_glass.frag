@@ -7,8 +7,11 @@ precision mediump int;
 /// The dimensions of the drawing area in physical pixels.
 uniform vec2 uSize;
 
-/// The base color of the glass material.
-uniform vec4 uGlassColor;
+/// The shade (brightness) modifier for the glass material.
+uniform vec4 uGlassShade;
+
+/// The tint color for the glass material (Hue-Blend + Alpha-Over).
+uniform vec4 uGlassTint;
 
 /// Optical properties packed into a single vector.
 /// x: Refractive Index
@@ -104,6 +107,15 @@ uniform float uChildCaSpread;
 /// A simple alpha-over tint applied to the background before glass processing.
 /// Equivalent to painting a semi-transparent color overlay on the background.
 uniform vec4 uBgOverlay;
+
+/// Per-shape tint override. If alpha > 0, overrides the global uGlassTint for that shape.
+uniform vec4 uShapeTints[MAX_SHAPES];
+
+/// Per-shape shade override. If alpha > 0, overrides the global uGlassShade for that shape.
+uniform vec4 uShapeShades[MAX_SHAPES];
+
+/// Per-shape color adjustment (x=saturation, y=lightness, z=tintBrightness).
+uniform vec3 uShapeColorBalance[MAX_SHAPES];
 
 /// The background scene texture.
 uniform sampler2D uBackgroundTexture;
@@ -250,14 +262,14 @@ vec2 _calculateDistortedUV(int shapeIndex, vec2 screenUV, vec2 scale, vec2 size)
 void main() {
     vec2 pScreen = FlutterFragCoord().xy;
     vec2 screenUV = _correctUVForTarget(_normalizeUV(pScreen, uSize));
-    
     vec2 localPoint = (uTransform * vec4(pScreen, 0.0, 1.0)).xy;
 
     int shapeIndex;
     float sdUnion = sceneSDF_withIndex_fast(localPoint, shapeIndex);
-    
-    float foregroundAlpha = _calculateForegroundAlpha(sdUnion);
+    int sc = int(uNumShapes + 0.5);
+    shapeIndex = _resolveTintedShapeIndex(localPoint, sc, shapeIndex);
 
+    float foregroundAlpha = _calculateForegroundAlpha(sdUnion);
     if (foregroundAlpha < 0.01) {
         fragColor = _sampleTexture(uBackgroundTexture, screenUV);
         return;
@@ -274,7 +286,7 @@ void main() {
     vec3 childNormal = _calculateSurfaceNormal(sdUnion, gradient, uChildThickness, uChildPlateauWidth, uChildSoftness);
 
     fragColor = renderLiquidGlass(
-        scaledUV, 
+        scaledUV,
         childUVRaw,
         localPoint,
         uSize,
@@ -282,7 +294,6 @@ void main() {
         uThickness,
         uRefractiveIndex,
         uChromaticAberration,
-        uGlassColor,
         uLightDirection,
         uLightIntensity,
         uAmbientStrength,
@@ -291,8 +302,6 @@ void main() {
         uBackgroundChildTexture,
         normal,
         foregroundAlpha,
-        uSaturation,
-        uLightness,
         rimWidthPx,
         uRimLightSpread,
         shapeIndex,
@@ -300,6 +309,7 @@ void main() {
         uChildThickness,
         uChildRefractiveIndex,
         childNormal,
-        uBgOverlay
+        uBgOverlay,
+        sc
     );
 }
