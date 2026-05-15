@@ -122,9 +122,9 @@ void _readShapeData(int shapeIndex, out float type, out vec2 center, out vec2 si
   cornerRadius = uShapeData[baseIndex + 5];
 }
 
-/// Dispatches the correct SDF calculation based on the shape type index.
+/// Dispatches the SDF calculation based on the shape type index.
 /// Delegates to calculateShapeSDF from lg_union_sdf.glsl, which handles
-/// RoundedRect, Ellipse (with center-singularity fix), and Squircle.
+/// RoundedRect, Ellipse, and Squircle.
 float _sdShapeAt(int shapeIndex, vec2 position) {
   float type, radius, smoothing;
   vec2 center, size;
