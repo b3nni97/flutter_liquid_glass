@@ -196,8 +196,8 @@ out vec4 fragColor;
 #define uDispersionFlipAngleP2   -1.1
 #define uDispersionFlipAngleVP2  0.04
 
-#include "shared.glsl"
 #include "lg_union_sdf.glsl"
+#include "shared.glsl"
 
 #ifndef AGSL_AA_WIDTH_PX
 #define AGSL_AA_WIDTH_PX 1.0

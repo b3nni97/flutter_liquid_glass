@@ -122,32 +122,14 @@ void _readShapeData(int shapeIndex, out float type, out vec2 center, out vec2 si
   cornerRadius = uShapeData[baseIndex + 5];
 }
 
-/// Computes the signed distance to a rounded rectangle.
-float _sdRoundedRect(vec2 position, vec2 center, vec2 size, float radius) {
-  vec2 halfSize = max(size * 0.5, vec2(0.0));
-  float clampedRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
-  vec2 q = abs(position - center) - (halfSize - vec2(clampedRadius));
-  return length(max(q, 0.0)) - clampedRadius + min(max(q.x, q.y), 0.0);
-}
-
-/// Computes the signed distance to an ellipse.
-float _sdEllipse(vec2 position, vec2 center, vec2 size) {
-  vec2 ab = max(size * 0.5, vec2(1e-4));
-  vec2 d = (position - center) / ab;
-  float k = length(d) - 1.0;
-  return k * min(ab.x, ab.y);
-}
-
 /// Dispatches the correct SDF calculation based on the shape type index.
+/// Delegates to calculateShapeSDF from lg_union_sdf.glsl, which handles
+/// RoundedRect, Ellipse (with center-singularity fix), and Squircle.
 float _sdShapeAt(int shapeIndex, vec2 position) {
-  float type, radius;
+  float type, radius, smoothing;
   vec2 center, size;
-  _readShapeData(shapeIndex, type, center, size, radius);
-
-  if (type == 2.0) {
-    return _sdEllipse(position, center, size);
-  }
-  return _sdRoundedRect(position, center, size, radius);
+  unpackShapeData(shapeIndex, type, center, size, radius, smoothing);
+  return calculateShapeSDF(type, position, center, size, radius, smoothing);
 }
 
 /// Projects a point from SDF space back to screen space using the inverse transform.
