@@ -11,6 +11,7 @@ import 'package:liquid_glass_renderer/src/background_child_sampler.dart';
 import 'package:liquid_glass_renderer/src/glass_link.dart';
 import 'package:liquid_glass_renderer/src/internal/transform_tracking_repaint_boundary_mixin.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass.dart';
+import 'package:liquid_glass_renderer/src/liquid_glass_renderer.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_opacity.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_settings.dart';
 import 'package:liquid_glass_renderer/src/raw_shapes.dart';
@@ -548,6 +549,35 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     clipBounds = _snapBoundsForBackdrop(clipBounds, offset);
     clipBounds = clipBounds.intersect(viewportInLayer);
 
+    // Stabilize the coordinate space when the glass is inside an isolating layer
+    // (Opacity / FadeTransition / AnimatedOpacity). Such a layer renders its
+    // subtree into an offscreen whose origin the engine does NOT expose to the
+    // shader, so FlutterFragCoord() gets rebased and the glass renders
+    // shifted/invisible. We can't read the offscreen origin, but we can neutralize
+    // it: paint two ~invisible 1px markers at opposite viewport corners so the
+    // enclosing saveLayer is forced to cover the full viewport → its offscreen
+    // origin becomes (0,0) → no rebase → glass stays at the correct position.
+    //
+    // Only do this when an isolating ancestor is actually present (detected by
+    // walking the render tree), so the normal case pays nothing. Cost when active:
+    // the saveLayer offscreen + this layer's paint bounds become full-screen.
+    // Can be globally disabled via [LiquidGlassRenderer.stabilizeCoordinatesUnderIsolation]
+    // (e.g. once the engine fixes the underlying coordinate behavior).
+    if (LiquidGlassRenderer.stabilizeCoordinatesUnderIsolation &&
+        _hasActiveIsolatingAncestor()) {
+      // A single 1px marker at the viewport's top-left (global 0,0) is enough:
+      // the saveLayer coverage becomes the bbox of {(0,0), the glass}, so its
+      // origin is (0,0) and FlutterFragCoord is no longer rebased. We anchor only
+      // the top-left (not the far corner) so the forced offscreen extends from
+      // (0,0) to the glass — minimal beyond what's needed (a thin strip for a top
+      // bar, rather than the whole screen).
+      final Rect vp = viewportInLayer.shift(offset);
+      context.canvas.drawRect(
+        Rect.fromLTWH(vp.left, vp.top, 1, 1),
+        Paint()..color = const Color(0x01000000),
+      );
+    }
+
     _uploadUniformsIfNeeded(
       shapeCount: shapeCount,
       shapes: shapes,
@@ -923,7 +953,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   void _uploadOpacityUniform() {
     if (_lastUploadedOpacity == _opacity) return;
     final double clamped = _opacity.clamp(0.0, 1.0);
-    debugPrint('LiquidGlassLayer: uploading opacity uniform = $clamped');
     _shader.setFloat(_idxOpacity, clamped);
     _lastUploadedOpacity = _opacity;
   }
@@ -1110,6 +1139,25 @@ class RenderLiquidGlassLayer extends RenderProxyBox
         ..setFloat(base + 5, shape.cornerRadius * _devicePixelRatio)
         ..setFloat(base + 6, shape.cornerSmoothing ?? -1.0);
     }
+  }
+
+  /// Walks the render tree upward looking for an ancestor that renders this
+  /// subtree into an isolating offscreen (which rebases the glass coordinates).
+  /// Used only to gate the full-viewport marker stabilization, so the normal
+  /// (non-isolated) case stays free of extra paint bounds.
+  ///
+  /// Covers Opacity / AnimatedOpacity / FadeTransition (RenderOpacity,
+  /// RenderAnimatedOpacity) with an effective opacity < 1.0 — the cases that
+  /// actually create the saveLayer.
+  bool _hasActiveIsolatingAncestor() {
+    RenderObject? p = parent;
+    int guard = 0;
+    while (p != null && guard++ < 100) {
+      if (p is RenderOpacity && p.opacity < 1.0) return true;
+      if (p is RenderAnimatedOpacity && p.opacity.value < 1.0) return true;
+      p = p.parent;
+    }
+    return false;
   }
 
   void _uploadTransformUniforms(Matrix4 globalToLocal) {

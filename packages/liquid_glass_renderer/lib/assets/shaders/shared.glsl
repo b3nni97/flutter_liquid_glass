@@ -1748,6 +1748,14 @@ vec4 renderLiquidGlass(
   float rimAlpha = masks.band;
   float mixAlpha = clamp(max(baseAlpha, rimAlpha), 0.0, 1.0) * opacity;
 
-  return mix(backgroundColor, outColor, mixAlpha);
+  // The RGB lerp already equals premultiplied src-over (glass surface with
+  // coverage mixAlpha over the backdrop). The output alpha must be that same
+  // src-over coverage — NOT inherited from the backdrop sample. Otherwise an
+  // empty backdrop (alpha 0, e.g. inside an isolating layer) zeroes the output
+  // alpha and the whole glass (tint/lighting/rim) disappears even though its
+  // RGB is correct.
+  vec4 result = mix(backgroundColor, outColor, mixAlpha);
+  result.a = mixAlpha + backgroundColor.a * (1.0 - mixAlpha);
+  return result;
 }
 #endif

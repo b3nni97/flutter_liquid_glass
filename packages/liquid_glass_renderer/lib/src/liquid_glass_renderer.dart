@@ -8,6 +8,21 @@ import 'package:liquid_glass_renderer/src/shaders.dart';
 class LiquidGlassRenderer {
   LiquidGlassRenderer._();
 
+  /// Whether to apply the coordinate-stabilization workaround for glass that
+  /// sits inside an isolating layer (Opacity / FadeTransition / saveLayer).
+  ///
+  /// Such a layer renders its subtree into an offscreen whose origin the engine
+  /// does not expose to the shader, so [FlutterFragCoord] gets rebased and the
+  /// glass renders shifted/misplaced. When enabled (the default), the renderer
+  /// forces that offscreen to cover the full viewport (via two ~invisible corner
+  /// markers) so its origin is (0,0) and no rebase occurs.
+  ///
+  /// Set to `false` to disable the workaround entirely — e.g. once a future
+  /// Flutter/Impeller release fixes the underlying coordinate behavior. This does
+  /// NOT affect the separate empty-backdrop alpha fix (which keeps the glass
+  /// visible when isolated); only the coordinate/position workaround is toggled.
+  static bool stabilizeCoordinatesUnderIsolation = true;
+
   /// Compiles and warms up the fragment shaders required by the renderer.
   ///
   /// This method executes [ShaderBuilder.precacheShader] for all known assets
