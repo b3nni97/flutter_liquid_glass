@@ -904,6 +904,10 @@ vec4 _calculateRefractionLayer(
   float blurRadius = clamp(stretch * 0.45, 0.0, 6.0);
 
   vec4 backgroundSample = _applyGaussianBlur(backgroundTexture, uvBase);
+  // Un-premultiply the refracted backdrop sample so a semi-transparent backdrop
+  // (glass isolated inside a save layer) yields its true colour instead of a darkened
+  // one. No-op for an opaque backdrop.
+  backgroundSample.rgb /= max(backgroundSample.a, 1e-3);
   outRawTexture = backgroundSample;
 
   // Apply background overlay before any tinting or color adjustment.
@@ -1649,6 +1653,11 @@ vec4 renderLiquidGlass(
     return backgroundColor;
   }
 
+  // Un-premultiply the backdrop colour used for shading (edge fade, rim lighting), so
+  // a semi-transparent backdrop is not read as too dark and does not paint a dark
+  // border around the shape. No-op for an opaque backdrop.
+  backgroundColor.rgb /= max(backgroundColor.a, 1e-3);
+
   // Resolve per-shape material parameters via SDF-weighted blending.
   BlendedMaterial mat = _blendShapeMaterials(position, shapeCount, shapeIndex, signedDistance);
 
@@ -1744,18 +1753,28 @@ vec4 renderLiquidGlass(
   // Apply tint bleed from all tinted shapes.
   outColor = _applyTintBleed(outColor, position, shapeCount, signedDistance, foregroundAlpha);
 
-  float baseAlpha = foregroundAlpha;
   float rimAlpha = masks.band;
-  float mixAlpha = clamp(max(baseAlpha, rimAlpha), 0.0, 1.0) * opacity;
+  float mixAlpha = max(foregroundAlpha, rimAlpha) * opacity;
+  float bgA = backgroundColor.a;
 
-  // The RGB lerp already equals premultiplied src-over (glass surface with
-  // coverage mixAlpha over the backdrop). The output alpha must be that same
-  // src-over coverage — NOT inherited from the backdrop sample. Otherwise an
-  // empty backdrop (alpha 0, e.g. inside an isolating layer) zeroes the output
-  // alpha and the whole glass (tint/lighting/rim) disappears even though its
-  // RGB is correct.
-  vec4 result = mix(backgroundColor, outColor, mixAlpha);
-  result.a = mixAlpha + backgroundColor.a * (1.0 - mixAlpha);
-  return result;
+  // Opaque backdrop: the standard glass surface, src-over the backdrop behind the
+  // filter. Output alpha is the surface coverage, not inherited from the sample.
+  vec4 opaqueResult = vec4(
+      mix(backgroundColor.rgb, outColor.rgb, mixAlpha),
+      mixAlpha + bgA * (1.0 - mixAlpha));
+
+  // Isolated backdrop (alpha < 1, glass inside a save layer): there is no real
+  // backdrop to refract. outColor over the empty backdrop is the glass's own
+  // premultiplied contribution, so its luminance is its coverage (body and rim).
+  // Emitting it this way lets the live content behind the layer show through and be
+  // shaded/tinted by the glass, instead of an opaque grey/dark block, and keeps the
+  // rim consistent with the opaque case rather than a constant grey edge.
+  float surfaceA = max(max(outColor.r, outColor.g), outColor.b);
+  vec4 isolatedResult = vec4(
+      outColor.rgb * foregroundAlpha * opacity,
+      surfaceA * foregroundAlpha * opacity);
+
+  // alpha == 1 -> opaqueResult, alpha == 0 -> isolatedResult.
+  return mix(isolatedResult, opaqueResult, bgA);
 }
 #endif

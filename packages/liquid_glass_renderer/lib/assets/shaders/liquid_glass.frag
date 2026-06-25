@@ -271,7 +271,11 @@ void main() {
 
     float foregroundAlpha = _calculateForegroundAlpha(sdUnion);
     if (foregroundAlpha < 0.01) {
-        fragColor = _sampleTexture(uBackgroundTexture, screenUV);
+        // Outside the glass shape: pass an opaque backdrop straight through. For a
+        // semi-transparent backdrop (glass isolated inside a save layer) emit
+        // transparent so the src-over backdrop filter does not double-composite it.
+        vec4 bg = _sampleTexture(uBackgroundTexture, screenUV);
+        fragColor = (bg.a >= 0.999) ? bg : vec4(0.0);
         return;
     }
 
