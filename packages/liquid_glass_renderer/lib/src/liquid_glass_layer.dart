@@ -11,6 +11,7 @@ import 'package:liquid_glass_renderer/src/background_child_sampler.dart';
 import 'package:liquid_glass_renderer/src/glass_link.dart';
 import 'package:liquid_glass_renderer/src/internal/transform_tracking_repaint_boundary_mixin.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass.dart';
+import 'package:liquid_glass_renderer/src/liquid_glass_backdrop_scope.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_renderer.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_opacity.dart';
 import 'package:liquid_glass_renderer/src/liquid_glass_settings.dart';
@@ -95,6 +96,7 @@ class LiquidGlassLayer extends StatefulWidget {
     this.restrictThickness = true,
     this.opacity,
     this.backgroundChildBuilder,
+    this.shareBackdrop = true,
     required this.child,
   });
 
@@ -121,6 +123,23 @@ class LiquidGlassLayer extends StatefulWidget {
   /// - NOT affected by blur or scaling settings.
   /// - Blended onto the backdrop using custom shader logic.
   final LiquidGlassBackgroundChildBuilder? backgroundChildBuilder;
+
+  /// Whether this layer shares the [BackdropKey] of an enclosing
+  /// [LiquidGlassBackdropScope].
+  ///
+  /// When `true` (the default) and a [LiquidGlassBackdropScope] is present in
+  /// the tree, this layer's backdrop filter uses the scope's shared key, so the
+  /// engine captures the backdrop once and reuses it across all sharing glass
+  /// layers. This is a **performance optimization** (one capture instead of N);
+  /// it does NOT make the glass survive an isolating save layer such as
+  /// [Opacity] — see [LiquidGlassBackdropScope] for the measured limitation.
+  ///
+  /// Set to `false` to opt out — required for glass that **overlaps** other
+  /// glass, since elements sharing a key can't refract each other. An opted-out
+  /// layer captures its own local backdrop instead.
+  ///
+  /// Has no effect when there is no [LiquidGlassBackdropScope] ancestor.
+  final bool shareBackdrop;
 
   /// The widget tree that contains the [LiquidGlass] shapes to be rendered.
   final Widget child;
@@ -164,6 +183,13 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
     final double resolvedOpacity =
         widget.opacity ?? GlassOpacityScope.maybeOf(context) ?? 1.0;
 
+    // Resolve the shared backdrop key. When opted in (default) and a
+    // LiquidGlassBackdropScope is present, all sharing layers push their
+    // backdrop with this single key so the engine captures the backdrop once.
+    final BackdropKey? backdropKey = widget.shareBackdrop
+        ? LiquidGlassBackdropScope.maybeOf(context)
+        : null;
+
     // Load both shaders efficiently using nested builders.
     Widget layerContent = ShaderBuilder(
       assetKey: liquidGlassShader,
@@ -181,6 +207,7 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
               viewportSize: viewportSize,
               link: _glassLink,
               emptySamplerImage: _emptySamplerImage,
+              backdropKey: backdropKey,
               child: widget.child,
             );
           },
@@ -256,6 +283,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
     required this.viewportSize,
     required this.link,
     required this.emptySamplerImage,
+    required this.backdropKey,
     required super.child,
   });
 
@@ -268,6 +296,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
   final Size viewportSize;
   final GlassLink link;
   final ui.Image emptySamplerImage;
+  final BackdropKey? backdropKey;
 
   @override
   RenderObject createRenderObject(BuildContext context) {
@@ -282,6 +311,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
       viewportSize: viewportSize,
       link: link,
       emptySamplerImage: emptySamplerImage,
+      backdropKey: backdropKey,
     );
   }
 
@@ -299,6 +329,7 @@ class _LiquidGlassRenderObjectWidget extends SingleChildRenderObjectWidget {
       ..viewportSize = viewportSize
       ..link = link
       ..emptySamplerImage = emptySamplerImage
+      ..backdropKey = backdropKey
       ..setShaders(shader, blurH);
   }
 }
@@ -334,6 +365,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     required Size viewportSize,
     required GlassLink link,
     required ui.Image emptySamplerImage,
+    required BackdropKey? backdropKey,
   })  : _devicePixelRatio = devicePixelRatio,
         _shader = shader,
         _blurH = blurH,
@@ -343,7 +375,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
         _imageHolder = imageHolder,
         _viewportSize = viewportSize,
         _glassLink = link,
-        _emptySamplerImage = emptySamplerImage {
+        _emptySamplerImage = emptySamplerImage,
+        _backdropKey = backdropKey {
     _glassLink.addListener(_onGlassLinkChanged);
     _initHBlurInvariants();
   }
@@ -407,6 +440,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   Size _viewportSize;
   GlassLink _glassLink;
   ui.Image _emptySamplerImage;
+  BackdropKey? _backdropKey;
 
   List<RawShape>? _lastShapes;
   List<GlassMaterial?>? _lastShapeMaterials;
@@ -475,6 +509,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox
   set emptySamplerImage(ui.Image value) {
     if (identical(_emptySamplerImage, value)) return;
     _emptySamplerImage = value;
+    markNeedsPaint();
+  }
+
+  set backdropKey(BackdropKey? value) {
+    if (_backdropKey == value) return;
+    _backdropKey = value;
     markNeedsPaint();
   }
 
@@ -623,6 +663,12 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     final BackdropFilterLayer backdropLayer =
         _backdropHandle.layer ?? BackdropFilterLayer();
     backdropLayer.filter = composedFilter;
+    // Share the backdrop capture across all glass layers using the same key, so
+    // the engine snapshots the backdrop once and reuses it (perf optimization for
+    // multiple non-overlapping glass surfaces). Null = no sharing. NOTE: this does
+    // NOT restore the backdrop for glass isolated inside an Opacity save layer —
+    // shared keys don't propagate into an isolated subpass (verified).
+    backdropLayer.backdropKey = _backdropKey;
 
     // Push the backdrop filter with a hard edge clip
     context.pushClipRect(

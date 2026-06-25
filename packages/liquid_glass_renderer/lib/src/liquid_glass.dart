@@ -21,6 +21,7 @@ class LiquidGlass extends StatelessWidget {
     this.restrictThickness = true,
     this.touches = const <TouchPoint>[],
     this.settings = const LiquidGlassSettings(),
+    this.shareBackdrop = true,
     super.key,
     required this.child,
   })  : _isStandalone = true,
@@ -39,7 +40,8 @@ class LiquidGlass extends StatelessWidget {
     required this.child,
   })  : _isStandalone = false,
         settings = null,
-        restrictThickness = false;
+        restrictThickness = false,
+        shareBackdrop = true;
 
   /// The geometric shape of the glass.
   final LiquidShape shape;
@@ -58,6 +60,14 @@ class LiquidGlass extends StatelessWidget {
 
   /// Configuration settings for the glass effect. Used only in standalone mode.
   final LiquidGlassSettings? settings;
+
+  /// Whether the standalone layer shares the [BackdropKey] of an enclosing
+  /// [LiquidGlassBackdropScope].
+  ///
+  /// Forwarded to the internally created [LiquidGlassLayer]. Set to `false` to
+  /// opt out for glass that overlaps other glass. Only relevant in standalone
+  /// mode; in [LiquidGlass.inLayer] the parent layer owns the backdrop.
+  final bool shareBackdrop;
 
   /// Optional glow style for this specific shape.
   ///
@@ -98,6 +108,7 @@ class LiquidGlass extends StatelessWidget {
       return LiquidGlassLayer(
         settings: settings!,
         restrictThickness: restrictThickness,
+        shareBackdrop: shareBackdrop,
         child: Builder(builder: buildShape),
       );
     }
