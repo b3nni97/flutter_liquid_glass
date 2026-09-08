@@ -86,11 +86,15 @@ class LiquidGlassOpacity extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // ExcludeSemantics stays in the tree permanently and only toggles its
+    // flag - swapping it in and out would recreate the child subtree and
+    // lose its state whenever the opacity crosses zero.
     return GlassOpacityScope(
       opacity: opacity,
-      child: alwaysIncludeSemantics || opacity > 0.0
-          ? child
-          : ExcludeSemantics(child: child),
+      child: ExcludeSemantics(
+        excluding: !alwaysIncludeSemantics && opacity <= 0.0,
+        child: child,
+      ),
     );
   }
 }
@@ -160,11 +164,16 @@ class _LiquidGlassAnimatedOpacityState
     final double currentOpacity =
         _opacityTween?.evaluate(animation) ?? widget.opacity;
 
+    // ExcludeSemantics stays in the tree permanently and only toggles its
+    // flag: swapping it in and out would change the element tree and
+    // recreate the whole child subtree - losing all its state (scroll
+    // positions, selections) every time a fade-out completes.
     return GlassOpacityScope(
       opacity: currentOpacity.clamp(0.0, 1.0),
-      child: widget.alwaysIncludeSemantics || currentOpacity > 0.0
-          ? widget.child
-          : ExcludeSemantics(child: widget.child),
+      child: ExcludeSemantics(
+        excluding: !widget.alwaysIncludeSemantics && currentOpacity <= 0.0,
+        child: widget.child,
+      ),
     );
   }
 }
