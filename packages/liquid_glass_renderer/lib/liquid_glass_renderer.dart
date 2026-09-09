@@ -21,4 +21,6 @@ export 'src/liquid_glass_settings.dart'
         GlassOptics,
         GlowStyle,
         LiquidGlassSettings;
+export 'src/liquid_rounded_superellipse_border.dart'
+    show LiquidRoundedSuperellipseBorder;
 export 'src/liquid_shape.dart';

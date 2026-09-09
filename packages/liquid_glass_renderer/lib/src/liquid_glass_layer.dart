@@ -186,9 +186,8 @@ class _LiquidGlassLayerState extends State<LiquidGlassLayer> {
     // Resolve the shared backdrop key. When opted in (default) and a
     // LiquidGlassBackdropScope is present, all sharing layers push their
     // backdrop with this single key so the engine captures the backdrop once.
-    final BackdropKey? backdropKey = widget.shareBackdrop
-        ? LiquidGlassBackdropScope.maybeOf(context)
-        : null;
+    final BackdropKey? backdropKey =
+        widget.shareBackdrop ? LiquidGlassBackdropScope.maybeOf(context) : null;
 
     // Load both shaders efficiently using nested builders.
     Widget layerContent = ShaderBuilder(
@@ -481,7 +480,6 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
   set opacity(double value) {
     if (_opacity == value) return;
-    debugPrint('LiquidGlassLayer: opacity changed $_opacity -> $value');
     _opacity = value;
     markNeedsPaint();
   }
@@ -642,8 +640,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     // Paint Pass 1: Shapes that contain their own children within the glass
     final int alpha = (_opacity * 255).round().clamp(0, 255);
     if (_opacity < 1.0) {
-      context.pushOpacity(offset, alpha,
-          (PaintingContext opCtx, Offset opOff) {
+      context.pushOpacity(offset, alpha, (PaintingContext opCtx, Offset opOff) {
         _paintShapeContents(opCtx, opOff, shapes, glassContainsChild: true);
       });
     } else {
@@ -693,8 +690,7 @@ class RenderLiquidGlassLayer extends RenderProxyBox
 
     // Paint Pass 2: Shapes that overlay the glass effect
     if (_opacity < 1.0) {
-      context.pushOpacity(offset, alpha,
-          (PaintingContext opCtx, Offset opOff) {
+      context.pushOpacity(offset, alpha, (PaintingContext opCtx, Offset opOff) {
         _paintShapeContents(opCtx, opOff, shapes, glassContainsChild: false);
         super.paint(opCtx, opOff);
       });
@@ -797,7 +793,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       union = (union == null) ? rectLocal : union.expandToInclude(rectLocal);
     }
     final Rect unionBounds = union ?? Rect.zero;
-    final double margin = (_settings.optics.blur * 3.0) + _settings.optics.thickness + 2.0;
+    final double margin =
+        (_settings.optics.blur * 3.0) + _settings.optics.thickness + 2.0;
     return unionBounds.inflate(margin);
   }
 
@@ -1079,28 +1076,22 @@ class RenderLiquidGlassLayer extends RenderProxyBox
       ..setFloat(_idxBgScale + 1, geo.backgroundScale.dy)
       ..setFloat(_idxNormalParams + 0, geo.normalPlateauWidth)
       ..setFloat(_idxNormalParams + 1, geo.normalSoftness)
-      ..setFloat(
-          _idxChildOpticalProps + 0,
+      ..setFloat(_idxChildOpticalProps + 0,
           _settings.childRefraction?.thickness ?? thickness)
-      ..setFloat(
-          _idxChildOpticalProps + 1,
+      ..setFloat(_idxChildOpticalProps + 1,
           _settings.childRefraction?.refractiveIndex ?? opt.refractiveIndex)
       ..setFloat(
           _idxChildOpticalProps + 2,
-          _settings.childRefraction?.normalPlateauWidth ?? geo.normalPlateauWidth)
-      ..setFloat(
-          _idxChildOpticalProps + 3,
+          _settings.childRefraction?.normalPlateauWidth ??
+              geo.normalPlateauWidth)
+      ..setFloat(_idxChildOpticalProps + 3,
           _settings.childRefraction?.normalSoftness ?? geo.normalSoftness)
-      ..setFloat(_idxChildCaSpread,
-          _settings.childRefraction?.caSpread ?? 1.0)
-      ..setFloat(_idxBgOverlay + 0,
-          (lit.backgroundOverlay?.red ?? 0) / 255.0)
-      ..setFloat(_idxBgOverlay + 1,
-          (lit.backgroundOverlay?.green ?? 0) / 255.0)
-      ..setFloat(_idxBgOverlay + 2,
-          (lit.backgroundOverlay?.blue ?? 0) / 255.0)
-      ..setFloat(_idxBgOverlay + 3,
-          (lit.backgroundOverlay?.alpha ?? 0) / 255.0);
+      ..setFloat(_idxChildCaSpread, _settings.childRefraction?.caSpread ?? 1.0)
+      ..setFloat(_idxBgOverlay + 0, (lit.backgroundOverlay?.red ?? 0) / 255.0)
+      ..setFloat(_idxBgOverlay + 1, (lit.backgroundOverlay?.green ?? 0) / 255.0)
+      ..setFloat(_idxBgOverlay + 2, (lit.backgroundOverlay?.blue ?? 0) / 255.0)
+      ..setFloat(
+          _idxBgOverlay + 3, (lit.backgroundOverlay?.alpha ?? 0) / 255.0);
 
     // 2. Upload BLUR Shader (Compact Set)
     // Only essential data for SDF
@@ -1119,10 +1110,9 @@ class RenderLiquidGlassLayer extends RenderProxyBox
     // Upload per-shape tint (pre-resolved: shape override or global fallback)
     for (int i = 0; i < _maxShapesPerLayer; i++) {
       final int base = _idxShapeTints + (i * 4);
-      final Color t = (i < shapes.length
-              ? shapes[i].renderObject?.material?.tint
-              : null) ??
-          mat.tint;
+      final Color t =
+          (i < shapes.length ? shapes[i].renderObject?.material?.tint : null) ??
+              mat.tint;
       _shader
         ..setFloat(base + 0, t.red / 255.0)
         ..setFloat(base + 1, t.green / 255.0)
@@ -1324,11 +1314,11 @@ class RenderLiquidGlassLayer extends RenderProxyBox
           : -1.0;
       // Glow shade: use glow's shade if explicitly set (alpha > 0),
       // otherwise fall back to per-shape shade, then global shade.
-      final Color glowShade = activeStyle.material?.shade ?? const Color(0x00FFFFFF);
+      final Color glowShade =
+          activeStyle.material?.shade ?? const Color(0x00FFFFFF);
       final Color shapeShade =
           shapes[i].renderObject?.material?.shade ?? _settings.material.shade;
-      final Color glassOverride =
-          glowShade.alpha > 0 ? glowShade : shapeShade;
+      final Color glassOverride = glowShade.alpha > 0 ? glowShade : shapeShade;
 
       _shader
         ..setFloat(baseIdx + 0, c.red / 255.0)
@@ -1349,7 +1339,8 @@ class RenderLiquidGlassLayer extends RenderProxyBox
         ..setFloat(baseIdx + 15, glassOverride.alpha / 255.0);
     }
 
-    _shader.setFloat(_idxGlobalBlurSigma, _settings.optics.blur * _devicePixelRatio);
+    _shader.setFloat(
+        _idxGlobalBlurSigma, _settings.optics.blur * _devicePixelRatio);
   }
 
   void _combineTouches(
